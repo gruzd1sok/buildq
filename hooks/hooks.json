@@ -1,0 +1,17 @@
+{
+  "description": "Deny heavy Xcode/Tuist builds that bypass the buildq queue",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/bin/buildq\" hook",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

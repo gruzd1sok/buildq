@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>io.github.gruzd1sok.buildq.bar</string>
+  <key>CFBundleName</key><string>BuildQBar</string>
+  <key>CFBundleDisplayName</key><string>BuildQ</string>
+  <key>CFBundleExecutable</key><string>BuildQBar</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+  <key>CFBundleVersion</key><string>__VERSION__</string>
+  <key>CFBundleDevelopmentRegion</key><string>en</string>
+  <key>CFBundleLocalizations</key><array><string>en</string><string>ru</string></array>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>BuildQ opens build logs and the event journal in Terminal.</string>
+  <key>NSHumanReadableCopyright</key><string>MIT License</string>
+</dict>
+</plist>

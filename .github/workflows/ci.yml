@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests (system python3)
+        run: /usr/bin/python3 -m unittest discover -s tests -v
+      - name: Build menu bar app
+        run: make app
+      - name: Smoke-test CLI
+        run: |
+          bin/buildq --version
+          BUILDQ_HOME=$RUNNER_TEMP/bq bin/buildq run --label smoke -- echo ok
+          BUILDQ_HOME=$RUNNER_TEMP/bq bin/buildq status

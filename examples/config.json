@@ -1,0 +1,9 @@
+{
+  "guard": {
+    "patterns": [
+      "^make\\s+(generate|project|build_app|use_caches\\w*)\\b",
+      "^fastlane\\s+\\S+\\s+(build|test)\\b",
+      "^swift\\s+(build|test)\\b"
+    ]
+  }
+}

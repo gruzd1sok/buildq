@@ -1,0 +1,619 @@
+#!/usr/bin/env python3
+"""buildq — machine-wide FIFO queue for heavy Xcode builds, shared by all worktrees and agents.
+
+Only one queued command runs at a time. Simulators are per-worktree clones, so the slot is held
+for the build only; installing and checking the app happens outside the queue.
+"""
+
+__version__ = "0.1.0"
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path(os.environ.get("BUILDQ_HOME", Path.home() / ".buildq"))
+QUEUE = HOME / "queue"
+LOGS = HOME / "logs"
+RUN_LOCK = HOME / "run.lock"
+SIM_LOCK = HOME / "sim.lock"
+HISTORY = HOME / "history.log"
+EVENTS = HOME / "events.log"
+SIM_SOURCE_FILE = HOME / "sim_source"
+CONFIG = HOME / "config.json"
+BASE_SIM = "buildq-base"
+SIM_PREFIX = "wt-"
+EX_TIMEOUT = 75
+KEEP_LOGS = 50
+ROTATE_BYTES = 5 << 20
+ORPHAN_GRACE = float(os.environ.get("BUILDQ_ORPHAN_GRACE", 20))
+
+
+def log(msg):
+    print(f"[buildq] {msg}", file=sys.stderr, flush=True)
+
+
+def append_jsonl(path, rec):
+    """Append one record; past ROTATE_BYTES the file moves to <name>.1 (one generation is kept)."""
+    HOME.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.stat().st_size > ROTATE_BYTES:
+            os.replace(path, path.with_name(path.name + ".1"))
+    except FileNotFoundError:
+        pass
+    with open(path, "a") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def event(kind, **fields):
+    """Append-only JSONL journal for post-mortems; never let logging break a build."""
+    try:
+        append_jsonl(EVENTS, {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind, "pid": os.getpid(),
+                              **fields})
+    except OSError:
+        pass
+
+
+def load_config():
+    try:
+        return json.loads(CONFIG.read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"ignoring {CONFIG}: {e}")
+        return {}
+
+
+def prune_logs():
+    logs = sorted(LOGS.glob("*.log"), key=lambda p: p.stat().st_mtime)
+    for p in logs[:-KEEP_LOGS]:
+        p.unlink(missing_ok=True)
+
+
+def fmt_dur(sec):
+    sec = int(sec)
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m{sec % 60:02d}s"
+    return f"{sec // 3600}h{sec % 3600 // 60:02d}m"
+
+
+def proc_start(pid):
+    r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
+    return r.stdout.strip() or None
+
+
+def alive(pid, start=None):
+    """pid + its start time, so a recycled pid is not mistaken for the original holder."""
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return start is None or proc_start(pid) == start
+
+
+def group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def worktree_root():
+    r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else os.getcwd()
+
+
+def git_branch():
+    r = subprocess.run(["git", "branch", "--show-current"], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def ensure_dirs():
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    LOGS.mkdir(parents=True, exist_ok=True)
+
+
+def write_ticket(t):
+    path = QUEUE / f"{t['id']}.json"
+    tmp = QUEUE / f".{t['id']}.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps(t))
+    os.replace(tmp, path)
+
+
+def enqueue(ticket):
+    """Assign a strictly increasing sequence number and publish the ticket atomically under one lock,
+    so the queue order is exactly the order of arrival."""
+    fd = os.open(HOME / "seq", os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        n = int(os.read(fd, 32) or 0) + 1
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, str(n).encode())
+        ticket["seq"] = n
+        ticket["id"] = f"{n:08d}-{ticket['pid']}"
+        write_ticket(ticket)
+    finally:
+        os.close(fd)
+
+
+def load_tickets():
+    out = []
+    for p in QUEUE.glob("*.json"):
+        try:
+            out.append(json.loads(p.read_text()))
+        except (OSError, json.JSONDecodeError):
+            continue
+    out.sort(key=lambda t: (t.get("seq", 0), t["enqueued_ns"]))
+    return out
+
+
+def reap():
+    """Drop tickets of dead holders. If the holder was SIGKILLed mid-build, its build keeps the slot
+    (it inherited the lock fd) until we stop it: SIGTERM, then SIGKILL after ORPHAN_GRACE seconds."""
+    for t in load_tickets():
+        if alive(t["pid"], t.get("pid_start")):
+            continue
+        pgid = t.get("child_pgid")
+        if pgid and group_alive(pgid):
+            now = time.time()
+            if t["state"] != "orphan":
+                t.update(state="orphan", orphan_since=now)
+                write_ticket(t)
+                os.killpg(pgid, signal.SIGTERM)
+                event("orphan_term", ticket=t["id"], holder_pid=t["pid"], pgid=pgid,
+                      worktree=t["worktree"], label=t["label"])
+            elif now - t["orphan_since"] > ORPHAN_GRACE and not t.get("orphan_killed"):
+                t["orphan_killed"] = True
+                write_ticket(t)
+                os.killpg(pgid, signal.SIGKILL)
+                event("orphan_kill", ticket=t["id"], pgid=pgid, worktree=t["worktree"], label=t["label"])
+            continue
+        (QUEUE / f"{t['id']}.json").unlink(missing_ok=True)
+        event("reaped", ticket=t["id"], holder_pid=t["pid"], state=t["state"], worktree=t["worktree"],
+              label=t["label"])
+
+
+def describe(t):
+    br = f" [{t['branch']}]" if t.get("branch") else ""
+    return f"{Path(t['worktree']).name}{br} «{t['label']}»"
+
+
+# ---------- run ----------
+
+def cmd_run(args):
+    cmd = args.cmd[1:] if args.cmd and args.cmd[0] == "--" else args.cmd
+    if not cmd:
+        sys.exit("buildq run: missing command, usage: buildq run [--label L] [--log FILE] -- <cmd...>")
+    ensure_dirs()
+    label = args.label or " ".join(cmd)[:80]
+    ticket = {
+        "enqueued_ns": time.time_ns(),
+        "pid": os.getpid(),
+        "pid_start": proc_start(os.getpid()),
+        "worktree": worktree_root(),
+        "branch": git_branch(),
+        "label": label,
+        "cmd": shlex.join(cmd)[:500],
+        "log": str(Path(args.log).absolute()) if args.log else None,
+        "state": "waiting",
+    }
+    enqueue(ticket)
+    ticket["full_log"] = str(LOGS / f"{ticket['id']}.log")
+    write_ticket(ticket)
+    ticket_path = QUEUE / f"{ticket['id']}.json"
+    lock_fd = os.open(RUN_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    state = {"child": None, "holding": False}
+
+    def cleanup():
+        ticket_path.unlink(missing_ok=True)
+        if state["holding"]:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            state["holding"] = False
+
+    def on_signal(signum, _frame):
+        child = state["child"]
+        if child and child.poll() is None:
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+                child.wait(timeout=15)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        cleanup()
+        event("interrupted", ticket=ticket["id"], signal=signum, state=ticket["state"],
+              worktree=ticket["worktree"], label=label, full_log=ticket["full_log"])
+        log(f"interrupted by signal {signum}, slot released")
+        sys.exit(128 + signum)
+
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, on_signal)
+
+    queued = load_tickets()
+    event("enqueued", ticket=ticket["id"], worktree=ticket["worktree"], branch=ticket["branch"], label=label,
+          cmd=ticket["cmd"], ahead=[describe(t) for t in queued if t["id"] != ticket["id"]])
+    start_wait = time.time()
+    last_report, last_pos = 0.0, None
+    while True:
+        reap()
+        tickets = load_tickets()
+        ids = [t["id"] for t in tickets]
+        if ticket["id"] not in ids:
+            write_ticket(ticket)
+            continue
+        pos = ids.index(ticket["id"])
+        if pos == 0:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                state["holding"] = True
+                break
+            except BlockingIOError:
+                pass
+        now = time.time()
+        waited = now - start_wait
+        if pos != last_pos or now - last_report >= args.report_every:
+            running = [t for t in tickets if t["state"] in ("running", "orphan")]
+            cur = (f"{running[0]['state']}: {describe(running[0])} for {fmt_dur(now - running[0]['started_at'])}"
+                   if running else "slot is being handed over")
+            log(f"waiting: position {pos + 1} of {len(tickets)} (waited {fmt_dur(waited)}); {cur}")
+            last_report, last_pos = now, pos
+        if args.max_wait and waited > args.max_wait * 60:
+            ahead = ", ".join(describe(t) for t in tickets[:pos])
+            log(f"gave up after {fmt_dur(waited)} in queue; ahead: {ahead}. "
+                f"Check `buildq status`, retry later or ask the user.")
+            event("timeout", ticket=ticket["id"], worktree=ticket["worktree"], label=label,
+                  waited=round(waited), ahead=ahead)
+            cleanup()
+            sys.exit(EX_TIMEOUT)
+        time.sleep(2)
+
+    waited = time.time() - start_wait
+    ticket.update(state="running", started_at=time.time())
+    write_ticket(ticket)
+    log(f"slot acquired after {fmt_dur(waited)}: {label} (log: {ticket['log'] or ticket['full_log']})")
+    event("acquired", ticket=ticket["id"], worktree=ticket["worktree"], label=label, waited=round(waited),
+          load=os.getloadavg()[0], full_log=ticket["full_log"])
+
+    # Full output always lands in ~/.buildq/logs; --log is a symlink to it for the caller.
+    if ticket["log"]:
+        Path(ticket["log"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(ticket["log"]).unlink(missing_ok=True)
+        os.symlink(ticket["full_log"], ticket["log"])
+    passthrough = not ticket["log"]
+    # The build inherits the locked fd: if this wrapper is SIGKILLed, the slot stays taken until the
+    # orphaned build is really gone, so two builds never overlap.
+    state["child"] = subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, pass_fds=(lock_fd,))
+    ticket["child_pgid"] = state["child"].pid
+    write_ticket(ticket)
+    with open(ticket["full_log"], "wb") as f:
+        f.write(f"# buildq {ticket['id']} {ticket['worktree']} [{ticket['branch']}]\n# $ {ticket['cmd']}\n".encode())
+        for chunk in iter(lambda: state["child"].stdout.read1(65536), b""):
+            f.write(chunk)
+            if passthrough:
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+    rc = state["child"].wait()
+    ran = time.time() - ticket["started_at"]
+    cleanup()
+    append_jsonl(HISTORY, {"id": ticket["id"], "worktree": ticket["worktree"], "branch": ticket["branch"],
+                           "label": label, "waited": round(waited), "ran": round(ran), "exit": rc,
+                           "full_log": ticket["full_log"], "finished_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    event("finished", ticket=ticket["id"], worktree=ticket["worktree"], label=label, exit=rc,
+          waited=round(waited), ran=round(ran), full_log=ticket["full_log"])
+    prune_logs()
+    log(f"finished in {fmt_dur(ran)} with exit {rc}; slot released")
+    if rc != 0 and ticket["log"]:
+        print_errors(ticket["full_log"])
+    sys.exit(rc)
+
+
+def print_errors(path, limit=40):
+    pat = re.compile(r"(error:|\*\* .*FAILED \*\*|Testing failed|fatal error)", re.I)
+    try:
+        lines = [l.rstrip() for l in open(path, errors="replace")
+                 if pat.search(l) and not l.startswith("# ")]
+    except OSError:
+        return
+    uniq = list(dict.fromkeys(lines))
+    if uniq:
+        log(f"errors from {path}:")
+        for l in uniq[:limit]:
+            print(l, file=sys.stderr)
+        if len(uniq) > limit:
+            log(f"... {len(uniq) - limit} more")
+
+
+# ---------- status / cancel ----------
+
+def cmd_status(args):
+    ensure_dirs()
+    reap()
+    now = time.time()
+    tickets = load_tickets()
+    if args.json:
+        print(json.dumps(tickets, indent=1))
+        return
+    if not tickets:
+        print("queue is empty")
+    for i, t in enumerate(tickets):
+        if t["state"] in ("running", "orphan"):
+            tag = "RUNNING " if t["state"] == "running" else "ORPHAN  "
+            print(f"{tag} {describe(t)}  for {fmt_dur(now - t['started_at'])}  pid {t['pid']}"
+                  + (f"  log {t['log'] or t['full_log']}" if t.get("full_log") else ""))
+        else:
+            print(f"#{i + 1:<7} {describe(t)}  waiting {fmt_dur(now - t['enqueued_ns'] / 1e9)}  pid {t['pid']}")
+    if args.history and HISTORY.exists():
+        print("\nrecent:")
+        for line in HISTORY.read_text().splitlines()[-args.history:]:
+            h = json.loads(line)
+            print(f"  {h['finished_at']}  exit {h['exit']:<3} ran {fmt_dur(h['ran']):>7}  waited "
+                  f"{fmt_dur(h['waited']):>7}  {Path(h['worktree']).name}  «{h['label']}»")
+
+
+def cmd_events(args):
+    if not EVENTS.exists():
+        print("no events yet")
+        return
+    for line in EVENTS.read_text().splitlines()[-args.n:]:
+        e = json.loads(line)
+        if args.kind and e["kind"] not in args.kind.split(","):
+            continue
+        if args.json:
+            print(line)
+            continue
+        rest = {k: v for k, v in e.items() if k not in ("ts", "kind", "pid")}
+        wt = rest.pop("worktree", "")
+        label = rest.pop("label", "")
+        head = f"{e['ts']}  {e['kind']:<18} pid {e['pid']:<6} {Path(wt).name if wt else ''}"
+        print(head + (f" «{label}»" if label else "") + ("  " + json.dumps(rest, ensure_ascii=False) if rest else ""))
+
+
+def cmd_cancel(args):
+    ensure_dirs()
+    for t in load_tickets():
+        if args.target in (t["id"], str(t["pid"])):
+            os.kill(t["pid"], signal.SIGTERM)
+            print(f"sent SIGTERM to {t['pid']} ({describe(t)})")
+            return
+    sys.exit(f"no ticket with id or pid {args.target}")
+
+
+# ---------- agent hook ----------
+
+LIGHT_XCODEBUILD = re.compile(
+    r"-(list|version|showsdks|showBuildSettings|showdestinations|showTestPlans|resolvePackageDependencies|help)\b"
+    r"|\btest-without-building\b")
+CMD_PREFIXES = {"env", "time", "nohup", "sudo", "xcrun", "caffeinate", "command", "exec"}
+SEGMENT_SPLIT = re.compile(r"&&|\|\||[;|\n()`]|\$\(")
+
+
+def normalize(segment):
+    """`FOO=1 env xcrun /usr/bin/xcodebuild -x` -> `xcodebuild -x`, so patterns see the real tool."""
+    words = segment.split()
+    while words and (words[0] in CMD_PREFIXES or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0])
+                     or words[0].startswith("-")):
+        words.pop(0)
+    return " ".join([os.path.basename(words[0])] + words[1:]) if words else ""
+
+
+def heavy(segment, config):
+    """Name of the heavy tool in this shell segment, or None."""
+    cmd = normalize(segment)
+    if not cmd:
+        return None
+    guard = config.get("guard", {})
+    if guard.get("builtin", True):
+        tool, _, rest = cmd.partition(" ")
+        if tool == "xcodebuild" and not LIGHT_XCODEBUILD.search(rest):
+            return "xcodebuild"
+        m = re.match(r"tuist\s+(generate|build|test|install|cache)\b", cmd)
+        if m:
+            return m.group(0)
+    for pat in guard.get("patterns", []):
+        try:
+            if re.search(pat, cmd):
+                return cmd[:80]
+        except re.error as e:
+            log(f"bad guard pattern {pat!r} in {CONFIG}: {e}")
+    return None
+
+
+def check_command(cmd, config):
+    if "buildq run" in cmd or "BUILDQ_BYPASS=1" in cmd:
+        return None
+    for seg in SEGMENT_SPLIT.split(cmd):
+        hit = heavy(seg, config)
+        if hit:
+            return hit
+    return None
+
+
+def cmd_hook(_args):
+    """Claude Code PreToolUse hook for Bash: deny heavy builds that bypass the queue."""
+    try:
+        data = json.load(sys.stdin)
+    except (ValueError, OSError):
+        return
+    cmd = (data.get("tool_input") or {}).get("command") or ""
+    hit = check_command(cmd, load_config())
+    if not hit:
+        return
+    reason = (f"`{hit}` must go through the shared build queue: other agents build in parallel and "
+              f"concurrent builds slow down or break each other. Re-run it as "
+              f"`buildq run --label '<what>' --log <file> -- <same command>` with run_in_background=true "
+              f"and wait for the completion notification; `buildq status` shows the queue. For the app use "
+              f"this worktree's own simulator: `buildq sim` prints its UDID.")
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                             "permissionDecisionReason": reason}}))
+    event("hook_deny", worktree=data.get("cwd", ""), hit=hit, cmd=cmd[:300], session=data.get("session_id", ""))
+
+
+# ---------- sim ----------
+
+def simctl(*a, check=True):
+    r = subprocess.run(["xcrun", "simctl", *a], capture_output=True, text=True)
+    if check and r.returncode != 0:
+        sys.exit(f"simctl {' '.join(a)} failed: {r.stderr.strip()}")
+    return r
+
+
+def devices():
+    data = json.loads(simctl("list", "devices", "-j").stdout)
+    return [{**d, "runtime": rt} for rt, devs in data["devices"].items()
+            for d in devs if d.get("isAvailable", True)]
+
+
+def find(name=None, udid=None):
+    for d in devices():
+        if (name and d["name"] == name) or (udid and d["udid"] == udid):
+            return d
+    return None
+
+
+def wait_state(udid, wanted, timeout=60):
+    end = time.time() + timeout
+    while time.time() < end:
+        d = find(udid=udid)
+        if d and d["state"] == wanted:
+            return
+        time.sleep(1)
+
+
+def refresh_base(source=None):
+    if source:
+        dev = find(udid=source) or find(name=source)
+        if not dev:
+            sys.exit(f"no simulator with UDID or name {source!r} (see `xcrun simctl list devices`)")
+        SIM_SOURCE_FILE.write_text(dev["udid"] + "\n")
+    src = os.environ.get("BUILDQ_SIM_SOURCE") or (
+        SIM_SOURCE_FILE.read_text().strip() if SIM_SOURCE_FILE.exists() else "")
+    if not src or not find(udid=src):
+        sys.exit("source simulator is not set or missing; run `buildq sim --refresh-base --source <UDID|name>`")
+    old = find(name=BASE_SIM)
+    if old:
+        simctl("delete", old["udid"])
+    was_booted = find(udid=src)["state"] == "Booted"
+    if was_booted:
+        log(f"shutting down source {src} to clone it")
+        simctl("shutdown", src, check=False)
+        wait_state(src, "Shutdown")
+    try:
+        udid = simctl("clone", src, BASE_SIM).stdout.strip()
+    finally:
+        if was_booted:
+            simctl("boot", src, check=False)
+    log(f"{BASE_SIM} = {udid} (clone of {src})")
+    event("sim_base_refreshed", udid=udid, source=src, source_was_booted=was_booted)
+
+
+def cmd_sim(args):
+    ensure_dirs()
+    lock_fd = os.open(SIM_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    if args.refresh_base:
+        refresh_base(args.source)
+        return
+    if args.list:
+        for d in devices():
+            if d["name"].startswith(SIM_PREFIX) or d["name"] == BASE_SIM:
+                print(f"{d['udid']}  {d['state']:<9} {d['name']}")
+        return
+    name = args.name or SIM_PREFIX + Path(worktree_root()).name
+    dev = find(name=name)
+    if args.rm:
+        if dev:
+            simctl("shutdown", dev["udid"], check=False)
+            simctl("delete", dev["udid"])
+            log(f"deleted {name}")
+            event("sim_deleted", name=name, udid=dev["udid"])
+        return
+    if not dev:
+        base = find(name=BASE_SIM)
+        if not base:
+            event("sim_no_base", name=name, worktree=worktree_root())
+            sys.exit(f"no {BASE_SIM}; ask the user to run `buildq sim --refresh-base` "
+                     f"(briefly shuts down their main simulator)")
+        if base["state"] != "Shutdown":
+            simctl("shutdown", base["udid"], check=False)
+            wait_state(base["udid"], "Shutdown")
+        udid = simctl("clone", base["udid"], name).stdout.strip()
+        log(f"created {name} = {udid} from {BASE_SIM}")
+        event("sim_created", name=name, udid=udid, worktree=worktree_root())
+        dev = find(udid=udid)
+    if not args.no_boot and dev["state"] != "Booted":
+        simctl("boot", dev["udid"], check=False)
+        simctl("bootstatus", dev["udid"], check=False)
+    print(dev["udid"])
+
+
+def main():
+    p = argparse.ArgumentParser(prog="buildq", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"buildq {__version__}")
+    sub = p.add_subparsers(dest="sub", required=True)
+
+    r = sub.add_parser("run", help="wait for the build slot, run the command, release the slot")
+    r.add_argument("--label", help="short description shown in status")
+    r.add_argument("--log", help="write command output to this file (status lines stay on stderr; "
+                                 "on failure the error lines are printed)")
+    r.add_argument("--max-wait", type=float, default=120,
+                   help="minutes to wait in queue, 0 = forever (default 120); exit 75 on timeout")
+    r.add_argument("--report-every", type=float, default=60, help="seconds between waiting reports")
+    r.add_argument("cmd", nargs=argparse.REMAINDER)
+    r.set_defaults(func=cmd_run)
+
+    s = sub.add_parser("status", help="show running and waiting builds")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--history", type=int, default=5, help="show N recent finished builds")
+    s.set_defaults(func=cmd_status)
+
+    c = sub.add_parser("cancel", help="stop a queued or running build by ticket id or pid")
+    c.add_argument("target")
+    c.set_defaults(func=cmd_cancel)
+
+    e = sub.add_parser("events", help=f"show the event journal ({EVENTS})")
+    e.add_argument("-n", type=int, default=50, help="last N events (default 50)")
+    e.add_argument("--kind", help="comma-separated kinds: enqueued,acquired,finished,interrupted,"
+                                  "timeout,reaped,hook_deny,sim_*")
+    e.add_argument("--json", action="store_true")
+    e.set_defaults(func=cmd_events)
+
+    m = sub.add_parser("sim", help="print UDID of this worktree's simulator, creating and booting it if needed")
+    m.add_argument("--name", help=f"simulator name (default {SIM_PREFIX}<worktree dir>)")
+    m.add_argument("--no-boot", action="store_true")
+    m.add_argument("--rm", action="store_true", help="delete this worktree's simulator")
+    m.add_argument("--list", action="store_true", help="list buildq simulators")
+    m.add_argument("--refresh-base", action="store_true",
+                   help=f"re-clone {BASE_SIM} from the source simulator (shuts it down briefly)")
+    m.add_argument("--source", help="with --refresh-base: UDID or name of the simulator to clone (remembered)")
+    m.set_defaults(func=cmd_sim)
+
+    h = sub.add_parser("hook", help="Claude Code PreToolUse hook: reads the tool call JSON on stdin, "
+                                    "denies heavy builds outside the queue")
+    h.set_defaults(func=cmd_hook)
+
+    args = p.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

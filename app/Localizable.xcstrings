@@ -1,0 +1,454 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "%@ is building": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ собирается"
+          }
+        }
+      }
+    },
+    "%@ is building, %lld waiting": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ собирается, ждут: %lld"
+          }
+        }
+      }
+    },
+    "%@ — %@\n\nThe agent gets exit code 143 and sees it in the buildq output.": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ — %@\n\nАгент получит код выхода 143 и увидит это в выводе buildq."
+          }
+        }
+      }
+    },
+    "%@: agent died, stopping the build": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@: агент умер, сборка останавливается"
+          }
+        }
+      }
+    },
+    "%@: build failed %@ ago": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@: сборка упала %@ назад"
+          }
+        }
+      }
+    },
+    "%@: built %@ ago": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@: собралось %@ назад"
+          }
+        }
+      }
+    },
+    "%@: compile errors (%lld)": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@: ошибки компиляции (%lld)"
+          }
+        }
+      }
+    },
+    "%@: longer than usual (%@ vs ~%@)": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@: дольше обычного (%@ вместо ~%@)"
+          }
+        }
+      }
+    },
+    "%lld files": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld file"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld files"
+                }
+              }
+            }
+          }
+        },
+        "ru": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld файл"
+                }
+              },
+              "few": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld файла"
+                }
+              },
+              "many": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld файлов"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld файла"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "%lld waiting": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld waiting"
+                }
+              }
+            }
+          }
+        },
+        "ru": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld ждёт"
+                }
+              },
+              "few": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld ждут"
+                }
+              },
+              "many": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld ждут"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld ждут"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "1 building": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 собирается"
+          }
+        }
+      }
+    },
+    "Agent died, stopping the build": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Агент умер, сборка останавливается"
+          }
+        }
+      }
+    },
+    "Build queue": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Очередь сборок"
+          }
+        }
+      }
+    },
+    "Cancel": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Отмена"
+          }
+        }
+      }
+    },
+    "Errors only": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Только ошибки"
+          }
+        }
+      }
+    },
+    "errors: %lld": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ошибок: %lld"
+          }
+        }
+      }
+    },
+    "Event log": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Журнал событий"
+          }
+        }
+      }
+    },
+    "Exit code %lld · waited %@ · ran %@": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Код выхода %lld · ждал %@ · собирался %@"
+          }
+        }
+      }
+    },
+    "first build in this worktree": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "первая сборка в этом worktree"
+          }
+        }
+      }
+    },
+    "Follow the log in Terminal": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Следить за логом в Терминале"
+          }
+        }
+      }
+    },
+    "idle": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "свободно"
+          }
+        }
+      }
+    },
+    "longer than usual (%@)": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "дольше обычного (%@)"
+          }
+        }
+      }
+    },
+    "Nothing is building": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сейчас ничего не собирается"
+          }
+        }
+      }
+    },
+    "preparing": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "подготовка"
+          }
+        }
+      }
+    },
+    "Queue is empty": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Очередь пуста"
+          }
+        }
+      }
+    },
+    "Quit": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Выйти"
+          }
+        }
+      }
+    },
+    "Recent": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Недавние"
+          }
+        }
+      }
+    },
+    "Remove": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Убрать"
+          }
+        }
+      }
+    },
+    "Remove from the queue": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Убрать из очереди"
+          }
+        }
+      }
+    },
+    "Remove from the queue?": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Убрать из очереди?"
+          }
+        }
+      }
+    },
+    "Show the log in Finder": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Показать лог в Finder"
+          }
+        }
+      }
+    },
+    "Stop": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Остановить"
+          }
+        }
+      }
+    },
+    "Stop the build": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Остановить сборку"
+          }
+        }
+      }
+    },
+    "Stop the build?": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Остановить сборку?"
+          }
+        }
+      }
+    },
+    "usually ~%@": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "обычно ~%@"
+          }
+        }
+      }
+    },
+    "Waiting": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ждут"
+          }
+        }
+      }
+    },
+    "waiting %@": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ждёт %@"
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

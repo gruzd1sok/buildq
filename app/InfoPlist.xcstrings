@@ -1,0 +1,12 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "NSAppleEventsUsageDescription" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "BuildQ opens build logs and the event journal in Terminal." } },
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "BuildQ открывает логи сборок и журнал событий в Терминале." } }
+      }
+    }
+  },
+  "version" : "1.0"
+}

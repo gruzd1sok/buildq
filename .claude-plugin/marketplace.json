@@ -1,0 +1,12 @@
+{
+  "name": "buildq",
+  "owner": { "name": "Ilya Gruzdev", "url": "https://github.com/gruzd1sok" },
+  "description": "buildq: one Xcode build at a time across all agents and worktrees on a Mac.",
+  "plugins": [
+    {
+      "name": "buildq",
+      "source": "./",
+      "description": "Machine-wide FIFO build queue and per-worktree simulators for AI agents building Xcode projects in parallel."
+    }
+  ]
+}
