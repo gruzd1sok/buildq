@@ -9,7 +9,7 @@ jobs:
   test:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Tests (system python3)
         run: /usr/bin/python3 -m unittest discover -s tests -v
       - name: Build menu bar app
@@ -23,7 +23,7 @@ jobs:
   homebrew:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install and test the formula from a local tap
         run: |
           brew tap-new --no-git local/buildq
