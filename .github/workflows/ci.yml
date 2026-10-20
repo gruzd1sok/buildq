@@ -19,3 +19,15 @@ jobs:
           bin/buildq --version
           BUILDQ_HOME=$RUNNER_TEMP/bq bin/buildq run --label smoke -- echo ok
           BUILDQ_HOME=$RUNNER_TEMP/bq bin/buildq status
+
+  homebrew:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install and test the formula from a local tap
+        run: |
+          brew tap-new --no-git local/buildq
+          cp Formula/buildq.rb "$(brew --repository local/buildq)/Formula/"
+          brew install --build-from-source local/buildq/buildq
+          brew test local/buildq/buildq
+          test -x "$(brew --prefix)/opt/buildq/BuildQBar.app/Contents/MacOS/BuildQBar"

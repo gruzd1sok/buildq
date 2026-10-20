@@ -2,7 +2,7 @@ class Buildq < Formula
   desc "Machine-wide FIFO build queue for parallel Xcode agents and worktrees"
   homepage "https://github.com/gruzd1sok/buildq"
   url "https://github.com/gruzd1sok/buildq/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "1a462da909e7f06cc1ecce02186989165b5817e3471f2609844b70fb18eba786"
   license "MIT"
   head "https://github.com/gruzd1sok/buildq.git", branch: "main"
 
