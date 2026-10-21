@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-10-21
 
 - `buildq hook` now rewrites a heavy command into `buildq run … -- "$SHELL" -c '<command>'` and
   runs it in the background instead of denying it. It makes no permission decision, so the user's

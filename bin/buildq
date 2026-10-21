@@ -5,7 +5,7 @@ Only one queued command runs at a time. Simulators are per-worktree clones, so t
 for the build only; installing and checking the app happens outside the queue.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import argparse
 import fcntl

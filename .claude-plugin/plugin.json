@@ -1,6 +1,6 @@
 {
   "name": "buildq",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Machine-wide FIFO build queue and per-worktree simulators for AI agents building Xcode projects in parallel.",
   "author": { "name": "Ilya Gruzdev", "url": "https://github.com/gruzd1sok" },
   "homepage": "https://github.com/gruzd1sok/buildq",
