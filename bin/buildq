@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -297,7 +298,7 @@ def cmd_run(args):
         Path(ticket["log"]).parent.mkdir(parents=True, exist_ok=True)
         Path(ticket["log"]).unlink(missing_ok=True)
         os.symlink(ticket["full_log"], ticket["log"])
-    passthrough = not ticket["log"]
+    passthrough = not (ticket["log"] or args.quiet or args.json)
     # The build inherits the locked fd: if this wrapper is SIGKILLed, the slot stays taken until the
     # orphaned build is really gone, so two builds never overlap.
     state["child"] = subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.PIPE,
@@ -321,25 +322,53 @@ def cmd_run(args):
           waited=round(waited), ran=round(ran), full_log=ticket["full_log"])
     prune_logs()
     log(f"finished in {fmt_dur(ran)} with exit {rc}; slot released")
-    if rc != 0 and ticket["log"]:
+    if not passthrough and not args.json:
+        log(f"full output: {ticket['log'] or ticket['full_log']} (`buildq log {ticket['id']} --tail 100`)")
+    if args.json:
+        print(json.dumps({"id": ticket["id"], "exit": rc, "waited": round(waited), "ran": round(ran),
+                          "log": ticket["full_log"], "errors": parse_errors(ticket["full_log"])[:ERRORS_LIMIT]
+                          if rc != 0 else []}, ensure_ascii=False))
+    elif rc != 0 and not passthrough:
         print_errors(ticket["full_log"])
     sys.exit(rc)
 
 
-def print_errors(path, limit=40):
-    pat = re.compile(r"(error:|\*\* .*FAILED \*\*|Testing failed|fatal error)", re.I)
+ERROR_LINE = re.compile(r"(error:|\*\* .*FAILED \*\*|Testing failed|fatal error)", re.I)
+LOCATED_ERROR = re.compile(r"^(?P<file>/[^:]+):(?P<line>\d+):(?:(?P<col>\d+):)?\s*(?:fatal )?error:\s*(?P<msg>.*)")
+ERRORS_LIMIT = 40
+
+
+def parse_errors(path):
+    """Unique error lines of a build log; compiler diagnostics are split into file/line/col/msg."""
     try:
-        lines = [l.rstrip() for l in open(path, errors="replace")
-                 if pat.search(l) and not l.startswith("# ")]
+        lines = [l.rstrip() for l in open(path, errors="replace") if ERROR_LINE.search(l) and not l.startswith("# ")]
     except OSError:
-        return
-    uniq = list(dict.fromkeys(lines))
-    if uniq:
+        return []
+    out = []
+    for l in dict.fromkeys(lines):
+        m = LOCATED_ERROR.match(l)
+        if m:
+            out.append({"file": m["file"], "line": int(m["line"]), "col": int(m["col"]) if m["col"] else None,
+                        "msg": m["msg"]})
+        else:
+            out.append({"msg": l.strip()})
+    return out
+
+
+def format_error(e):
+    if "file" not in e:
+        return e["msg"]
+    return f"{e['file']}:{e['line']}:{str(e['col']) + ':' if e['col'] else ''} error: {e['msg']}"
+
+
+def print_errors(path, limit=ERRORS_LIMIT):
+    errors = parse_errors(path)
+    if errors:
         log(f"errors from {path}:")
-        for l in uniq[:limit]:
-            print(l, file=sys.stderr)
-        if len(uniq) > limit:
-            log(f"... {len(uniq) - limit} more")
+        for e in errors[:limit]:
+            print(format_error(e), file=sys.stderr)
+        if len(errors) > limit:
+            log(f"... {len(errors) - limit} more")
 
 
 # ---------- status / cancel ----------
@@ -397,6 +426,62 @@ def cmd_cancel(args):
     sys.exit(f"no ticket with id or pid {args.target}")
 
 
+def history():
+    out = []
+    for path in (HISTORY.with_name(HISTORY.name + ".1"), HISTORY):
+        try:
+            out += [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+        except (OSError, json.JSONDecodeError):
+            continue
+    return out
+
+
+def find_build(target, any_worktree=False):
+    """A queued/running ticket or a finished history record by id (a unique prefix is enough);
+    without an id, this worktree's latest build."""
+    builds = history() + [t for t in load_tickets() if t.get("full_log")]
+    if target:
+        hits = [b for b in builds if b["id"] == target] or [b for b in builds if b["id"].startswith(target)]
+        if not hits:
+            sys.exit(f"no build with id {target}")
+        if len({b["id"] for b in hits}) > 1:
+            sys.exit(f"{target} matches several builds: {', '.join(dict.fromkeys(b['id'] for b in hits))}")
+        return hits[-1]
+    if not any_worktree:
+        wt = worktree_root()
+        builds = [b for b in builds if b["worktree"] == wt]
+    if not builds:
+        sys.exit("no builds yet" + ("" if any_worktree else " in this worktree; --all looks at every worktree"))
+    return builds[-1]
+
+
+def cmd_errors(args):
+    b = find_build(args.id, args.all)
+    errors = parse_errors(b["full_log"])
+    if args.json:
+        print(json.dumps({"id": b["id"], "exit": b.get("exit"), "state": b.get("state", "finished"),
+                          "log": b["full_log"], "errors": errors[:args.limit]}, ensure_ascii=False))
+        return
+    print(f"{b['id']}  exit {b.get('exit', b.get('state'))}  «{b['label']}»  {b['full_log']}")
+    for e in errors[:args.limit]:
+        print(format_error(e))
+    if len(errors) > args.limit:
+        print(f"... {len(errors) - args.limit} more")
+
+
+def cmd_log(args):
+    b = find_build(args.id, args.all)
+    if args.path:
+        print(b["full_log"])
+        return
+    try:
+        with open(b["full_log"], errors="replace") as f:
+            lines = f.readlines()
+    except OSError as e:
+        sys.exit(f"cannot read {b['full_log']}: {e}")
+    sys.stdout.write("".join(lines[-args.tail:] if args.tail else lines))
+
+
 # ---------- agent hook ----------
 
 LIGHT_XCODEBUILD = re.compile(
@@ -448,23 +533,51 @@ def check_command(cmd, config):
 
 
 def cmd_hook(_args):
-    """Claude Code PreToolUse hook for Bash: deny heavy builds that bypass the queue."""
+    """Claude Code PreToolUse hook for Bash: heavy builds that bypass the queue are rewritten to go
+    through it (guard.mode "rewrite", the default) or denied (guard.mode "deny")."""
     try:
         data = json.load(sys.stdin)
     except (ValueError, OSError):
         return
-    cmd = (data.get("tool_input") or {}).get("command") or ""
-    hit = check_command(cmd, load_config())
+    tool_input = data.get("tool_input") or {}
+    cmd = tool_input.get("command") or ""
+    config = load_config()
+    hit = check_command(cmd, config)
     if not hit:
+        return
+    session = data.get("session_id", "")
+    if config.get("guard", {}).get("mode", "rewrite") == "rewrite":
+        wrapped = rewrite(cmd, hit)
+        # No permissionDecision: the rewritten command still goes through the user's permission rules.
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "updatedInput": {**tool_input, "command": wrapped, "run_in_background": True},
+            "additionalContext": f"buildq moved `{hit}` into the shared build queue (other agents build in "
+                                 f"parallel) and runs it in the background as: {wrapped}\nWait for the "
+                                 f"completion notification. The build output stays in a log file (its path is "
+                                 f"printed at the end); on failure the error lines are printed too. "
+                                 f"`buildq log --tail 100` and `buildq errors` show the latest build of this "
+                                 f"worktree, `buildq status` shows the queue."}}))
+        event("hook_rewrite", worktree=data.get("cwd", ""), hit=hit, cmd=cmd[:300], session=session)
         return
     reason = (f"`{hit}` must go through the shared build queue: other agents build in parallel and "
               f"concurrent builds slow down or break each other. Re-run it as "
-              f"`buildq run --label '<what>' --log <file> -- <same command>` with run_in_background=true "
+              f"`buildq run --label '<what>' --quiet -- <same command>` with run_in_background=true "
               f"and wait for the completion notification; `buildq status` shows the queue. For the app use "
               f"this worktree's own simulator: `buildq sim` prints its UDID.")
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                              "permissionDecisionReason": reason}}))
-    event("hook_deny", worktree=data.get("cwd", ""), hit=hit, cmd=cmd[:300], session=data.get("session_id", ""))
+    event("hook_deny", worktree=data.get("cwd", ""), hit=hit, cmd=cmd[:300], session=session)
+
+
+def rewrite(cmd, hit):
+    """The whole command line runs inside the slot via the user's shell, so pipes, `cd`, `&&` and
+    variable assignments keep working. Output is kept quiet unless the command already shapes it."""
+    me = os.path.realpath(sys.argv[0])
+    on_path = shutil.which("buildq")
+    exe = "buildq" if on_path and os.path.realpath(on_path) == me else shlex.quote(me)
+    quiet = "" if re.search(r"[|>]", cmd) else " --quiet"
+    return f'{exe} run{quiet} --label {shlex.quote(hit)} -- "${{SHELL:-/bin/sh}}" -c {shlex.quote(cmd)}'
 
 
 # ---------- sim ----------
@@ -578,6 +691,10 @@ def main():
     r.add_argument("--max-wait", type=float, default=120,
                    help="minutes to wait in queue, 0 = forever (default 120); exit 75 on timeout")
     r.add_argument("--report-every", type=float, default=60, help="seconds between waiting reports")
+    r.add_argument("--quiet", action="store_true",
+                   help="keep the command output in the log only; on failure print the error lines")
+    r.add_argument("--json", action="store_true",
+                   help="like --quiet, then print one JSON object: id, exit, waited, ran, log, errors")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
     r.set_defaults(func=cmd_run)
 
@@ -585,6 +702,19 @@ def main():
     s.add_argument("--json", action="store_true")
     s.add_argument("--history", type=int, default=5, help="show N recent finished builds")
     s.set_defaults(func=cmd_status)
+
+    for name, func, help_ in (("errors", cmd_errors, "error lines of a build (default: this worktree's latest)"),
+                              ("log", cmd_log, "output of a build (default: this worktree's latest)")):
+        x = sub.add_parser(name, help=help_)
+        x.add_argument("id", nargs="?", help="ticket id or its unique prefix")
+        x.add_argument("--all", action="store_true", help="latest build of any worktree")
+        x.set_defaults(func=func)
+        if name == "errors":
+            x.add_argument("--json", action="store_true")
+            x.add_argument("--limit", type=int, default=ERRORS_LIMIT)
+        else:
+            x.add_argument("--tail", type=int, default=0, help="only the last N lines")
+            x.add_argument("--path", action="store_true", help="print the log path only")
 
     c = sub.add_parser("cancel", help="stop a queued or running build by ticket id or pid")
     c.add_argument("target")

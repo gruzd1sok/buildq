@@ -14,9 +14,12 @@ Each worktree gets **its own simulator clone**, so the queue holds the slot only
 runs. Installing, launching and checking the app on your simulator happens outside the queue, and
 the next agent's build starts right after yours finishes.
 
-A PreToolUse hook denies raw `xcodebuild` and `tuist generate|build|test|install|cache` in Bash
-(plus any patterns from `~/.buildq/config.json`). Light calls pass without the queue:
-`xcodebuild -list|-showBuildSettings|-showdestinations|-version`, `test-without-building`.
+A PreToolUse hook catches raw `xcodebuild` and `tuist generate|build|test|install|cache` in Bash
+(plus any patterns from `~/.buildq/config.json`) and rewrites them into
+`buildq run … -- "$SHELL" -c '<your command>'` in the background, so a forgotten wrapper still goes
+through the queue. Wrap builds yourself anyway: you choose the label and the output mode. Light
+calls pass without the queue: `xcodebuild -list|-showBuildSettings|-showdestinations|-version`,
+`test-without-building`.
 
 ## Build
 
@@ -24,15 +27,20 @@ Run with `run_in_background: true` and wait for the completion notification — 
 not sleep. Waiting can take a while if others are building.
 
 ```bash
-buildq run --label "App build: fix login crash" --log /tmp/<scratch>/build.log -- \
+buildq run --label "App build: fix login crash" --quiet -- \
   xcodebuild -workspace App.xcworkspace -scheme App \
   -destination "id=$(buildq sim --no-boot)" build
 ```
 
 - Status lines go to stderr: `waiting: position 2 of 3 …; running: <worktree> [branch] «label» for 4m10s`,
   then `slot acquired …`, then `finished in … with exit N; slot released`.
-- With `--log` the command output goes to that file; on failure buildq prints its `error:` lines.
-  Without `--log` the output passes through.
+- `--quiet` keeps the build output in `~/.buildq/logs/<ticket>.log`; on failure buildq prints the
+  error lines. `--log FILE` does the same and symlinks FILE to the log. Without either, the output
+  passes through.
+- `--json` is `--quiet` plus one JSON object on stdout at the end:
+  `{"id", "exit", "waited", "ran", "log", "errors": [{"file", "line", "col", "msg"} | {"msg"}]}`.
+- Later: `buildq errors [--json]` and `buildq log --tail 100` show this worktree's latest build;
+  pass a ticket id (or its unique prefix) for an older one.
 - The exit code is the command's exit code. `75` means it gave up after `--max-wait` minutes
   (default 120): tell the user who is ahead (`buildq status`) instead of retrying in a loop.
 - Several heavy steps in one slot: `buildq run --label "gen+build" -- bash -c 'tuist generate --no-open && xcodebuild …'`.
@@ -70,7 +78,7 @@ Only when the user explicitly says to build outside the queue: prefix the comman
 - `buildq events [-n 50] [--kind finished,interrupted,…]` — the journal `~/.buildq/events.log`:
   `enqueued` (who was ahead), `acquired` (wait time, load average), `finished` (exit, durations),
   `interrupted`, `timeout`, `orphan_term|orphan_kill` (a holder died mid-build; its build keeps the
-  slot until it is stopped), `reaped`, `hook_deny`, `sim_*`.
+  slot until it is stopped), `reaped`, `hook_rewrite|hook_deny`, `sim_*`.
 - Full output of every run: `~/.buildq/logs/<ticket>.log` (last 50 kept); `--log FILE` is a symlink to it.
 
 Start from `buildq events` and the matching full log when the user asks what went wrong.

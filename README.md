@@ -49,8 +49,12 @@ code. Any number of agents, terminals and scripts can call it at once.
 - **One simulator per worktree.** `buildq sim` clones a prepared base simulator (already logged
   in, settings applied) for each worktree. The slot is held only while building. Installing,
   launching and UI checks happen outside the queue, in parallel.
-- **Guard hook for Claude Code.** A raw `xcodebuild` or `tuist generate` is denied. The agent is
-  told to re-run it through the queue.
+- **Guard hook for Claude Code.** A raw `xcodebuild` or `tuist generate` is moved into the queue
+  on the fly: the hook rewrites the command to `buildq run … -- <the same command>` and runs it in
+  the background. The agent does not have to know about buildq at all.
+- **Machine-readable results.** `buildq run --json` ends with one JSON object (exit code, timings,
+  log path, errors split into file/line/message); `buildq errors` and `buildq log` read any past
+  build.
 - **Menu bar app.** A hammer icon works as a traffic light. Its popover shows the running build
   with progress and ETA, the waiting list and recent results. English and Russian.
 - **Post-mortems.** buildq keeps a full log of every run and a JSONL journal of every queue
@@ -143,6 +147,31 @@ LoginViewModel.swift:48:17: error: cannot find 'session' in scope
 
 The exit code is 65, the same as `xcodebuild`'s, so scripts and agents can react to it as usual.
 
+`--quiet` does the same without a `--log` file: the output stays in `~/.buildq/logs/`, and the last
+line tells where.
+
+### JSON result and errors of past builds
+
+```
+$ buildq run --json --label "App build" -- xcodebuild -scheme App build
+[buildq] slot acquired after 0s: App build (log: /Users/me/.buildq/logs/00000043-24102.log)
+[buildq] finished in 1m12s with exit 65; slot released
+{"id": "00000043-24102", "exit": 65, "waited": 0, "ran": 72, "log": "/Users/me/.buildq/logs/00000043-24102.log",
+ "errors": [{"file": "/src/App/LoginViewModel.swift", "line": 48, "col": 17, "msg": "cannot find 'session' in scope"},
+            {"msg": "** BUILD FAILED **"}]}
+```
+
+The status lines stay on stderr, so stdout is exactly one JSON object.
+
+```bash
+buildq errors                # error lines of this worktree's latest build
+buildq errors --json         # the same as JSON
+buildq errors 00000043       # a specific build, by ticket id or its unique prefix
+buildq log --tail 100        # the last 100 lines of this worktree's latest build
+buildq log --path            # just the log path
+buildq log --all             # the latest build of any worktree
+```
+
 ### Unit tests
 
 ```bash
@@ -226,7 +255,7 @@ $ buildq events -n 6
 2026-10-20 16:03:05  enqueued           pid 23785  app «App: login fix»  {"ticket": "00000042-23785", "branch": "main", "ahead": ["app-feature-x [feature/x] «unit tests»"]}
 2026-10-20 16:09:36  acquired           pid 23785  app «App: login fix»  {"waited": 391, "load": 14.2, ...}
 2026-10-20 16:10:38  finished           pid 23785  app «App: login fix»  {"exit": 65, "waited": 391, "ran": 62, "full_log": "..."}
-2026-10-20 16:11:02  hook_deny          pid 24410  app-onboarding  {"hit": "xcodebuild", "cmd": "xcodebuild -scheme App build", "session": "..."}
+2026-10-20 16:11:02  hook_rewrite       pid 24410  app-onboarding  {"hit": "xcodebuild", "cmd": "xcodebuild -scheme App build", "session": "..."}
 2026-10-20 16:20:40  orphan_term        pid 24518  app-feature-x «unit tests»  {"holder_pid": 23600, "pgid": 23611}
 2026-10-20 16:21:00  orphan_kill        pid 24518  app-feature-x «unit tests»  {"pgid": 23611}
 
@@ -259,15 +288,30 @@ machine can go through the queue: `swift build`, `fastlane`, `bazel`, Android Gr
 
 ### What the Claude Code hook does
 
-An agent that runs a raw `xcodebuild -scheme App build` gets this instead:
+An agent runs a raw command:
 
+```bash
+cd app && xcodebuild -scheme App build | xcbeautify
 ```
-`xcodebuild` must go through the shared build queue: other agents build in parallel and concurrent
-builds slow down or break each other. Re-run it as `buildq run --label '<what>' --log <file> --
-<same command>` with run_in_background=true and wait for the completion notification;
-`buildq status` shows the queue. For the app use this worktree's own simulator: `buildq sim`
-prints its UDID.
+
+The hook rewrites it before it runs:
+
+```bash
+buildq run --label xcodebuild -- "${SHELL:-/bin/sh}" -c 'cd app && xcodebuild -scheme App build | xcbeautify'
 ```
+
+and switches the call to `run_in_background`, so a long wait in the queue never hits the Bash
+timeout. The agent gets a short note that its build was queued and is notified when it finishes.
+
+- The whole command line runs inside the slot through your shell, so pipes, `cd`, `&&` and
+  variables behave exactly as before.
+- If the command does not pipe or redirect its output, `--quiet` is added: the build log stays in
+  `~/.buildq/logs/`, and only error lines reach the agent's context.
+- The hook makes no permission decision. The rewritten command goes through your normal permission
+  rules. To let agents build without prompts, allow `Bash(buildq run:*)`.
+
+With `"mode": "deny"` in [the config](#project-specific-heavy-commands), the hook blocks the
+command instead and tells the agent to re-run it through `buildq run`.
 
 Light commands pass untouched:
 - `xcodebuild -list`, `-showBuildSettings`, `-showdestinations`, `-version`, `-showsdks`;
@@ -332,7 +376,7 @@ Then copy [`skills/buildq/SKILL.md`](skills/buildq/SKILL.md) to `~/.claude/skill
 
 Claude Code can run `buildq run …` with `run_in_background: true`, so the agent is notified when the
 build finishes instead of hitting the Bash timeout while it waits in the queue. The skill tells it
-to do so.
+to do so, and the hook does it for commands the agent did not wrap itself.
 
 ### Codex, OpenCode, Cursor and others
 
@@ -344,17 +388,19 @@ Put `buildq` on `PATH` and add a rule to the project's `AGENTS.md` (or the agent
 Several agents build this project in parallel on one machine. Never run `xcodebuild build/test`
 or `tuist generate` directly. Always use the shared queue:
 
-    buildq run --label "<what you build>" --log <file> -- <command>
+    buildq run --label "<what you build>" --quiet -- <command>
 
 It blocks until your build is done and returns the command's exit code (75 = waited too long,
-check `buildq status`). Use your worktree's own simulator: `UDID=$(buildq sim)`; never `booted`.
+check `buildq status`). On failure it prints the error lines; `buildq errors` and
+`buildq log --tail 100` show them again later. Use your worktree's own simulator:
+`UDID=$(buildq sim)`; never `booted`.
 ```
 
 ## Configuration
 
 ### Project-specific heavy commands
 
-By default the hook blocks:
+By default the hook moves into the queue:
 - `xcodebuild` (except the light calls listed above);
 - `tuist generate|build|test|install|cache`.
 
@@ -368,7 +414,8 @@ You can add your project's wrappers in `~/.buildq/config.json`:
       "^fastlane\\s+\\S+\\s+(build|test)\\b",
       "bootstrap\\.sh\\b"
     ],
-    "builtin": true
+    "builtin": true,
+    "mode": "rewrite"
   }
 }
 ```
@@ -378,6 +425,8 @@ You can add your project's wrappers in `~/.buildq/config.json`:
   such as `env`, `time`, `xcrun`, `caffeinate` and `nohup` are stripped, and with the tool's
   basename (so `./scripts/bootstrap.sh` becomes `bootstrap.sh`).
 - `"builtin": false` disables the default `xcodebuild`/`tuist` rules.
+- `"mode"`: `"rewrite"` (default) puts the command into the queue; `"deny"` blocks it and asks the
+  agent to use `buildq run` itself.
 
 See [`examples/config.json`](examples/config.json).
 
@@ -395,8 +444,10 @@ See [`examples/config.json`](examples/config.json).
 
 | Command | What it does |
 |---|---|
-| `buildq run [--label L] [--log FILE] [--max-wait MIN] [--report-every SEC] -- CMD…` | wait for the slot, run `CMD`, release the slot |
+| `buildq run [--label L] [--log FILE \| --quiet \| --json] [--max-wait MIN] [--report-every SEC] -- CMD…` | wait for the slot, run `CMD`, release the slot |
 | `buildq status [--json] [--history N]` | running build, waiting tickets, last N results |
+| `buildq errors [ID] [--all] [--json] [--limit N]` | error lines of a build (default: this worktree's latest) |
+| `buildq log [ID] [--all] [--tail N] [--path]` | output of a build (default: this worktree's latest) |
 | `buildq cancel PID\|TICKET` | stop a waiting or running build (SIGTERM to its `buildq run`) |
 | `buildq events [-n N] [--kind K1,K2] [--json]` | the event journal |
 | `buildq sim [--name N] [--no-boot]` | print (create and boot) this worktree's simulator UDID |
@@ -423,7 +474,7 @@ Event kinds in the journal:
 | `timeout` | it gives up after `--max-wait` |
 | `orphan_term`, `orphan_kill` | its holder died mid-build and the orphaned build is stopped |
 | `reaped` | a dead ticket is removed |
-| `hook_deny` | the hook blocks a command (with session id and cwd) |
+| `hook_rewrite`, `hook_deny` | the hook moves a command into the queue or blocks it (with session id and cwd) |
 | `sim_created`, `sim_deleted`, `sim_no_base`, `sim_base_refreshed` | simulator lifecycle |
 
 ## How it works

@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+- `buildq hook` now rewrites a heavy command into `buildq run … -- "$SHELL" -c '<command>'` and
+  runs it in the background instead of denying it. It makes no permission decision, so the user's
+  permission rules still apply. `"guard": {"mode": "deny"}` keeps the old behaviour.
+- `buildq run --quiet` (output only in the log) and `--json` (one result object with parsed errors).
+- `buildq errors` and `buildq log` for the latest or any past build.
+
 ## [0.1.0] - 2026-10-20
 
 First public release.
