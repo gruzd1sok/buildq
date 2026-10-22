@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""buildq — machine-wide FIFO queue for heavy Xcode builds, shared by all worktrees and agents.
+"""buildq — machine-wide queue for heavy Xcode builds, shared by all worktrees and agents.
 
-Only one queued command runs at a time. Simulators are per-worktree clones, so the slot is held
+Only one queued command runs at a time. Waiting builds go by priority (major > normal > minor), FIFO
+within one priority; a running build is never preempted. Simulators are per-worktree clones, so the slot is held
 for the build only; installing and checking the app happens outside the queue.
 """
 
@@ -9,6 +10,7 @@ __version__ = "0.2.0"
 
 import argparse
 import fcntl
+import itertools
 import json
 import os
 import re
@@ -35,6 +37,8 @@ EX_TIMEOUT = 75
 KEEP_LOGS = 50
 ROTATE_BYTES = 5 << 20
 ORPHAN_GRACE = float(os.environ.get("BUILDQ_ORPHAN_GRACE", 20))
+PRIORITIES = ("minor", "normal", "major")
+DEFAULT_PRIORITY = "normal"
 
 
 def log(msg):
@@ -154,15 +158,45 @@ def enqueue(ticket):
         os.close(fd)
 
 
+def priority_rank(t):
+    p = t.get("priority", DEFAULT_PRIORITY)
+    return PRIORITIES.index(p) if p in PRIORITIES else PRIORITIES.index(DEFAULT_PRIORITY)
+
+
 def load_tickets():
+    """Queue order: the running build first, then waiting ones by priority, FIFO within a priority."""
     out = []
     for p in QUEUE.glob("*.json"):
         try:
             out.append(json.loads(p.read_text()))
         except (OSError, json.JSONDecodeError):
             continue
-    out.sort(key=lambda t: (t.get("seq", 0), t["enqueued_ns"]))
+    out.sort(key=lambda t: (t["state"] == "waiting", -priority_rank(t), t.get("seq", 0), t["enqueued_ns"]))
     return out
+
+
+def resolve_priority(explicit, label, worktree, branch, config):
+    """--priority, then $BUILDQ_PRIORITY, then the first matching config rule, then the config default.
+    A rule matches when all its conditions hold: `env` (variable is set and non-empty), and regexes
+    `label`, `worktree`, `branch`."""
+    for p, source in ((explicit, "--priority"), (os.environ.get("BUILDQ_PRIORITY"), "BUILDQ_PRIORITY")):
+        if p:
+            if p in PRIORITIES:
+                return p
+            log(f"ignoring {source}={p!r}: expected one of {', '.join(PRIORITIES)}")
+    conf = config.get("priority", {})
+    for rule in conf.get("rules", []):
+        try:
+            if rule.get("priority") in PRIORITIES and all((
+                    not rule.get("env") or os.environ.get(rule["env"]),
+                    not rule.get("label") or re.search(rule["label"], label),
+                    not rule.get("worktree") or re.search(rule["worktree"], worktree),
+                    not rule.get("branch") or re.search(rule["branch"], branch))):
+                return rule["priority"]
+        except re.error as e:
+            log(f"bad priority rule {rule!r} in {CONFIG}: {e}")
+    default = conf.get("default", DEFAULT_PRIORITY)
+    return default if default in PRIORITIES else DEFAULT_PRIORITY
 
 
 def reap():
@@ -193,7 +227,8 @@ def reap():
 
 def describe(t):
     br = f" [{t['branch']}]" if t.get("branch") else ""
-    return f"{Path(t['worktree']).name}{br} «{t['label']}»"
+    pr = f" ({t['priority']})" if t.get("priority", DEFAULT_PRIORITY) != DEFAULT_PRIORITY else ""
+    return f"{Path(t['worktree']).name}{br} «{t['label']}»{pr}"
 
 
 # ---------- run ----------
@@ -204,13 +239,15 @@ def cmd_run(args):
         sys.exit("buildq run: missing command, usage: buildq run [--label L] [--log FILE] -- <cmd...>")
     ensure_dirs()
     label = args.label or " ".join(cmd)[:80]
+    worktree, branch = worktree_root(), git_branch()
     ticket = {
         "enqueued_ns": time.time_ns(),
         "pid": os.getpid(),
         "pid_start": proc_start(os.getpid()),
-        "worktree": worktree_root(),
-        "branch": git_branch(),
+        "worktree": worktree,
+        "branch": branch,
         "label": label,
+        "priority": resolve_priority(args.priority, label, worktree, branch, load_config()),
         "cmd": shlex.join(cmd)[:500],
         "log": str(Path(args.log).absolute()) if args.log else None,
         "state": "waiting",
@@ -250,7 +287,8 @@ def cmd_run(args):
 
     queued = load_tickets()
     event("enqueued", ticket=ticket["id"], worktree=ticket["worktree"], branch=ticket["branch"], label=label,
-          cmd=ticket["cmd"], ahead=[describe(t) for t in queued if t["id"] != ticket["id"]])
+          priority=ticket["priority"], cmd=ticket["cmd"],
+          ahead=[describe(t) for t in itertools.takewhile(lambda t: t["id"] != ticket["id"], queued)])
     start_wait = time.time()
     last_report, last_pos = 0.0, None
     while True:
@@ -261,6 +299,8 @@ def cmd_run(args):
             write_ticket(ticket)
             continue
         pos = ids.index(ticket["id"])
+        # `buildq priority` (or the menu bar app) may change it while we wait.
+        ticket["priority"] = tickets[pos].get("priority", ticket["priority"])
         if pos == 0:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -389,7 +429,8 @@ def cmd_status(args):
             print(f"{tag} {describe(t)}  for {fmt_dur(now - t['started_at'])}  pid {t['pid']}"
                   + (f"  log {t['log'] or t['full_log']}" if t.get("full_log") else ""))
         else:
-            print(f"#{i + 1:<7} {describe(t)}  waiting {fmt_dur(now - t['enqueued_ns'] / 1e9)}  pid {t['pid']}")
+            print(f"#{i + 1:<7} {describe(t)}  waiting {fmt_dur(now - t['enqueued_ns'] / 1e9)}  pid {t['pid']}"
+                  f"  id {t['id']}")
     if args.history and HISTORY.exists():
         print("\nrecent:")
         for line in HISTORY.read_text().splitlines()[-args.history:]:
@@ -422,6 +463,22 @@ def cmd_cancel(args):
         if args.target in (t["id"], str(t["pid"])):
             os.kill(t["pid"], signal.SIGTERM)
             print(f"sent SIGTERM to {t['pid']} ({describe(t)})")
+            return
+    sys.exit(f"no ticket with id or pid {args.target}")
+
+
+def cmd_priority(args):
+    """Change the priority of a waiting build; it moves within the queue on its next poll."""
+    ensure_dirs()
+    reap()
+    for t in load_tickets():
+        if args.target in (t["id"], str(t["pid"])):
+            old = t.get("priority", DEFAULT_PRIORITY)
+            t["priority"] = args.level
+            write_ticket(t)
+            event("priority", ticket=t["id"], worktree=t["worktree"], label=t["label"], old=old, new=args.level)
+            note = "" if t["state"] == "waiting" else f" (already {t['state']}, the order is unaffected)"
+            print(f"{describe(t)}: {old} -> {args.level}{note}")
             return
     sys.exit(f"no ticket with id or pid {args.target}")
 
@@ -686,6 +743,8 @@ def main():
 
     r = sub.add_parser("run", help="wait for the build slot, run the command, release the slot")
     r.add_argument("--label", help="short description shown in status")
+    r.add_argument("--priority", choices=PRIORITIES,
+                   help=f"queue priority (default: $BUILDQ_PRIORITY, then config rules, then {DEFAULT_PRIORITY})")
     r.add_argument("--log", help="write command output to this file (status lines stay on stderr; "
                                  "on failure the error lines are printed)")
     r.add_argument("--max-wait", type=float, default=120,
@@ -720,10 +779,15 @@ def main():
     c.add_argument("target")
     c.set_defaults(func=cmd_cancel)
 
+    pr = sub.add_parser("priority", help="change the priority of a queued build by ticket id or pid")
+    pr.add_argument("target")
+    pr.add_argument("level", choices=PRIORITIES)
+    pr.set_defaults(func=cmd_priority)
+
     e = sub.add_parser("events", help=f"show the event journal ({EVENTS})")
     e.add_argument("-n", type=int, default=50, help="last N events (default 50)")
     e.add_argument("--kind", help="comma-separated kinds: enqueued,acquired,finished,interrupted,"
-                                  "timeout,reaped,hook_deny,sim_*")
+                                  "timeout,priority,reaped,hook_deny,sim_*")
     e.add_argument("--json", action="store_true")
     e.set_defaults(func=cmd_events)
 

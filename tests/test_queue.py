@@ -120,6 +120,49 @@ class Queue(unittest.TestCase):
         for k in ("orphan_term", "orphan_kill", "reaped"):
             self.assertIn(k, kinds)
 
+    def test_higher_priority_overtakes_waiting_builds_but_not_the_running_one(self):
+        holder = self.job("holder", 4)
+        time.sleep(1)
+        minor = self.job("minor", 0.1, "--priority", "minor")
+        time.sleep(0.3)
+        normal = self.job("normal", 0.1)
+        time.sleep(0.3)
+        major = self.job("major", 0.1, "--priority", "major")
+        time.sleep(0.5)
+        tickets = json.loads(self.home.run("status", "--json").stdout)
+        self.assertEqual([t["label"] for t in tickets], ["holder", "major", "normal", "minor"])
+        for p in (holder, minor, normal, major):
+            self.assertEqual(p.wait(timeout=30), 0)
+        starts = [name for kind, name, _ in self.trace_events() if kind == "S"]
+        self.assertEqual(starts, ["holder", "major", "normal", "minor"])
+
+    def test_priority_comes_from_env_then_config_rules(self):
+        (self.home.path / "config.json").write_text(json.dumps({"priority": {"default": "normal", "rules": [
+            {"env": "AUTOFIX_KEY", "priority": "minor"}, {"label": "^hotfix", "priority": "major"}]}}))
+        cases = [({}, "x", "normal"), ({"AUTOFIX_KEY": "COM-1"}, "x", "minor"), ({}, "hotfix 1", "major"),
+                 ({"AUTOFIX_KEY": "COM-1", "BUILDQ_PRIORITY": "major"}, "x", "major")]
+        for env, label, want in cases:
+            self.home.env = {**{k: v for k, v in self.home.env.items() if k not in ("AUTOFIX_KEY", "BUILDQ_PRIORITY")},
+                             **env}
+            self.assertEqual(self.home.run("run", "--label", label, "--", "true").returncode, 0)
+            self.assertEqual(self.events("enqueued")[-1]["priority"], want, (env, label))
+
+    def test_priority_of_waiting_build_can_be_changed(self):
+        holder = self.job("holder", 4)
+        time.sleep(1)
+        first = self.job("first", 0.1)
+        time.sleep(0.3)
+        second = self.job("second", 0.1)
+        time.sleep(0.5)
+        r = self.home.run("priority", str(second.pid), "major")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("normal -> major", r.stdout)
+        for p in (holder, first, second):
+            self.assertEqual(p.wait(timeout=30), 0)
+        starts = [name for kind, name, _ in self.trace_events() if kind == "S"]
+        self.assertEqual(starts, ["holder", "second", "first"])
+        self.assertEqual(self.events("priority")[0]["new"], "major")
+
     def test_journal_rotates(self):
         cli = load_cli()
         cli.HOME, cli.EVENTS, cli.ROTATE_BYTES = self.home.path, self.home.path / "events.log", 1000

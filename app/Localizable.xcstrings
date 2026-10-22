@@ -219,6 +219,16 @@
         }
       }
     },
+    "Change priority": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Изменить приоритет"
+          }
+        }
+      }
+    },
     "Errors only": {
       "localizations": {
         "ru": {
@@ -299,6 +309,36 @@
         }
       }
     },
+    "major": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "высокий"
+          }
+        }
+      }
+    },
+    "minor": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "низкий"
+          }
+        }
+      }
+    },
+    "normal": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "обычный"
+          }
+        }
+      }
+    },
     "Nothing is building": {
       "localizations": {
         "ru": {
@@ -325,6 +365,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Очередь пуста"
+          }
+        }
+      }
+    },
+    "Queue priority: %@": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Приоритет в очереди: %@"
           }
         }
       }

@@ -5,5 +5,18 @@
       "^fastlane\\s+\\S+\\s+(build|test)\\b",
       "^swift\\s+(build|test)\\b"
     ]
+  },
+  "priority": {
+    "default": "normal",
+    "rules": [
+      {
+        "env": "AUTOFIX_KEY",
+        "priority": "minor"
+      },
+      {
+        "label": "^hotfix\\b",
+        "priority": "major"
+      }
+    ]
   }
 }

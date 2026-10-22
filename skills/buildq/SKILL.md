@@ -52,7 +52,13 @@ buildq run --label "App build: fix login crash" --quiet -- \
 buildq status            # running build, waiting positions, recent finished builds
 buildq status --json
 buildq cancel <pid|id>   # only your own build, or when the user asks
+buildq priority <pid|id> minor|normal|major   # only when the user asks
 ```
+
+- Waiting builds go by priority (`major` > `normal` > `minor`), FIFO within one; the running
+  build is never preempted. Default `normal`; `--priority` or `$BUILDQ_PRIORITY` override it, and
+  `~/.buildq/config.json` rules can set it (e.g. autofix sessions are `minor`). Don't raise your
+  own priority unless the user asks.
 
 ## Simulator
 

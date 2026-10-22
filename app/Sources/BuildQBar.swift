@@ -23,6 +23,46 @@ struct Ticket: Decodable, Identifiable, Equatable {
     let enqueued_ns: Double
     let started_at: Double?
     let full_log: String?
+    let priority: String?
+
+    var level: Priority { priority.flatMap(Priority.init(rawValue:)) ?? .normal }
+}
+
+/// Mirrors buildq PRIORITIES: waiting builds go by priority, FIFO within one.
+enum Priority: String, CaseIterable {
+    case major, normal, minor
+
+    var rank: Int {
+        switch self {
+        case .minor: return 0
+        case .normal: return 1
+        case .major: return 2
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .major: return L("major")
+        case .normal: return L("normal")
+        case .minor: return L("minor")
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .major: return "arrow.up"
+        case .normal: return "equal"
+        case .minor: return "arrow.down"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .major: return .orange
+        case .normal: return .secondary
+        case .minor: return .blue
+        }
+    }
 }
 
 struct Hist: Decodable, Identifiable, Equatable {
@@ -135,7 +175,10 @@ final class Loader: @unchecked Sendable {
             let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
             out.tickets = files.filter { $0.pathExtension == "json" }
                 .compactMap { try? JSONDecoder().decode(Ticket.self, from: Data(contentsOf: $0)) }
-                .sorted { ($0.seq ?? 0, $0.enqueued_ns) < ($1.seq ?? 0, $1.enqueued_ns) }
+                .sorted {
+                    ($0.state == "waiting" ? 1 : 0, -$0.level.rank, $0.seq ?? 0, $0.enqueued_ns)
+                        < ($1.state == "waiting" ? 1 : 0, -$1.level.rank, $1.seq ?? 0, $1.enqueued_ns)
+                }
             let hist = home.appendingPathComponent("history.log")
             let stamp = (try? FileManager.default.attributesOfItem(atPath: hist.path))?[.modificationDate] as? Date
             if stamp != historyStamp, let text = try? String(contentsOf: hist, encoding: .utf8) {
@@ -265,6 +308,13 @@ enum Act {
 
     static func events() { terminal("\(q(cli)) status; echo; \(q(cli)) events -n 40") }
 
+    static func setPriority(_ t: Ticket, _ p: Priority) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        task.arguments = [cli, "priority", t.id, p.rawValue]
+        try? task.run()
+    }
+
     static func cancel(_ t: Ticket) {
         NSApp.activate(ignoringOtherApps: true)
         let waiting = t.state == "waiting"
@@ -301,6 +351,42 @@ struct IconButton: View {
     }
 }
 
+struct PriorityBadge: View {
+    let p: Priority
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: p.symbol).font(.system(size: 8, weight: .bold))
+            Text(p.title).font(.system(size: 10, weight: .medium))
+        }
+        .foregroundStyle(p.color)
+        .padding(.horizontal, 5).padding(.vertical, 1)
+        .background(Capsule().fill(p.color.opacity(0.15)))
+        .help(L("Queue priority: %@", p.title))
+    }
+}
+
+struct PriorityMenu: View {
+    let t: Ticket
+
+    var body: some View {
+        Menu {
+            ForEach(Priority.allCases, id: \.self) { p in
+                Button { Act.setPriority(t, p) } label: {
+                    if p == t.level { Label(p.title, systemImage: "checkmark") } else { Text(p.title) }
+                }
+            }
+        } label: {
+            Image(systemName: "arrow.up.arrow.down").font(.system(size: 12, weight: .medium))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .frame(width: 24, height: 22)
+        .help(L("Change priority"))
+    }
+}
+
 struct SectionTitle: View {
     let text: String
     var body: some View {
@@ -333,6 +419,7 @@ struct RunningCard: View {
                 HStack(alignment: .firstTextBaseline) {
                     Circle().fill(m.light.light.color).frame(width: 8, height: 8)
                     Text(name(t.worktree)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    if t.level != .normal { PriorityBadge(p: t.level) }
                     Spacer()
                     Text(dur(elapsed)).font(.system(size: 13, weight: .medium, design: .rounded)).monospacedDigit()
                 }
@@ -394,11 +481,15 @@ struct WaitingRow: View {
                 .frame(width: 20, height: 20)
                 .background(Circle().fill(Color.primary.opacity(0.08)))
             VStack(alignment: .leading, spacing: 2) {
-                Text(name(t.worktree)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(name(t.worktree)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    PriorityBadge(p: t.level)
+                }
                 Text(t.label).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
             if hover {
+                PriorityMenu(t: t)
                 IconButton(symbol: "xmark.circle", help: L("Remove from the queue"), tint: .red) { Act.cancel(t) }
             } else {
                 VStack(alignment: .trailing, spacing: 2) {
@@ -411,6 +502,13 @@ struct WaitingRow: View {
         .padding(.vertical, 4).padding(.horizontal, 6)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(hover ? 0.06 : 0)))
         .onHover { hover = $0 }
+        .contextMenu {
+            ForEach(Priority.allCases, id: \.self) { p in
+                Button { Act.setPriority(t, p) } label: {
+                    if p == t.level { Label(p.title, systemImage: "checkmark") } else { Text(p.title) }
+                }
+            }
+        }
     }
 }
 
