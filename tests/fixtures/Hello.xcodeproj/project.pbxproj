@@ -1,0 +1,55 @@
+// !$*UTF8*$!
+{
+    archiveVersion = 1;
+    classes = {};
+    objectVersion = 56;
+    objects = {
+        000000000000000000000001 = {
+            isa = PBXProject;
+            attributes = { LastUpgradeCheck = 1500; };
+            buildConfigurationList = 000000000000000000000002;
+            compatibilityVersion = "Xcode 14.0";
+            developmentRegion = en;
+            hasScannedForEncodings = 0;
+            knownRegions = (en, Base);
+            mainGroup = 000000000000000000000003;
+            productRefGroup = 000000000000000000000004;
+            projectDirPath = "";
+            projectRoot = "";
+            targets = (000000000000000000000005);
+        };
+        000000000000000000000002 = { isa = XCConfigurationList; buildConfigurations = (000000000000000000000006); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+        000000000000000000000003 = { isa = PBXGroup; children = (000000000000000000000007, 000000000000000000000004); sourceTree = "<group>"; };
+        000000000000000000000004 = { isa = PBXGroup; children = (000000000000000000000008); name = Products; sourceTree = "<group>"; };
+        000000000000000000000005 = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = 000000000000000000000009;
+            buildPhases = (000000000000000000000010);
+            buildRules = ();
+            dependencies = ();
+            name = Hello;
+            productName = Hello;
+            productReference = 000000000000000000000008;
+            productType = "com.apple.product-type.tool";
+        };
+        000000000000000000000006 = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                SDKROOT = macosx;
+                MACOSX_DEPLOYMENT_TARGET = 13.0;
+                DEBUG_INFORMATION_FORMAT = dwarf;
+                GCC_OPTIMIZATION_LEVEL = 0;
+                ONLY_ACTIVE_ARCH = YES;
+                CODE_SIGNING_ALLOWED = NO;
+            };
+            name = Debug;
+        };
+        000000000000000000000007 = { isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = main.c; sourceTree = "<group>"; };
+        000000000000000000000008 = { isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = Hello; sourceTree = BUILT_PRODUCTS_DIR; };
+        000000000000000000000009 = { isa = XCConfigurationList; buildConfigurations = (000000000000000000000011); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+        000000000000000000000010 = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (000000000000000000000012); runOnlyForDeploymentPostprocessing = 0; };
+        000000000000000000000011 = { isa = XCBuildConfiguration; buildSettings = { PRODUCT_NAME = "$(TARGET_NAME)"; }; name = Debug; };
+        000000000000000000000012 = { isa = PBXBuildFile; fileRef = 000000000000000000000007; };
+    };
+    rootObject = 000000000000000000000001;
+}

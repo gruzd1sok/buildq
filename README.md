@@ -26,6 +26,7 @@ code. Any number of agents, terminals and scripts can call it at once.
 - [Features](#features)
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Reusable build bases](#reusable-build-bases)
 - [Examples](#examples)
 - [Menu bar app](#menu-bar-app)
 - [Setting up agents](#setting-up-agents)
@@ -40,6 +41,10 @@ code. Any number of agents, terminals and scripts can call it at once.
 - **Strict FIFO, no races.** Each ticket gets a sequence number under a file lock, and the build
   slot itself is an `fcntl` lock. Two agents that enqueue in the same millisecond still get a fixed
   order and never overlap.
+- **Priorities.** Waiting builds go by priority — `major`, `normal` (default), `minor` — and FIFO
+  within one priority. Background agents can stay `minor` so interactive work goes first; a running
+  build is never preempted. Set per run, by env or config rules, or change it later from the CLI
+  or the menu bar app.
 - **Crash-safe.** If an agent dies, the kernel releases its slot. If an agent is SIGKILLed in the
   middle of a build, its orphaned build keeps the slot until buildq stops it (SIGTERM, then
   SIGKILL), so even then two builds never run at once.
@@ -114,6 +119,40 @@ buildq run --label "first build" --log /tmp/build.log -- \
 # 3. See what is going on
 buildq status
 ```
+
+## Reusable build bases
+
+`--base NAME` builds in a fixed checkout with its own DerivedData, shared by this repository's
+worktrees. Unchanged files keep their timestamps, so a fresh worktree can reuse an incremental
+build. Sync, preparation, compilation and product export all run inside the existing queue.
+
+```bash
+buildq run --base debug --prepare 'tuist generate --no-open' \
+  --products-to /tmp/app-build-123 --quiet -- \
+  xcodebuild -workspace App.xcworkspace -scheme App \
+  -destination "id=$(buildq sim --no-boot)" build
+
+buildq bases --json
+```
+
+BuildQBar shows a `Base: debug` badge on the running build, queued builds and history entries.
+It identifies the build mode; the first build in a base can still be cold.
+
+Omit `--prepare` for a checked-in Xcode project. Use your project's actual generation command
+(for example `make tuist_fast`) for Tuist projects. A base starts cold; a similar worktree's next
+build reuses its build data. Use separate names for incompatible configurations.
+
+`--products-to` must name a **new directory**. Its products and dSYMs outlive the next build in
+the base. Without it, products in the base may change immediately after the queue is released.
+Install exported products on your worktree's own simulator, outside the queue.
+
+For direct Xcode invocations, export checks the actual product directories before compilation
+and rejects outputs outside the base's Products tree. Symlinks that escape the exported tree
+are also rejected; internal relative framework links are preserved.
+
+The mode is opt-in. It does not enable a shared compilation cache or change project build
+settings. See [build bases](docs/build-bases.md) for preparation, SSD storage, ignored inputs,
+shell commands, symbols and limitations.
 
 ## Examples
 
@@ -428,6 +467,36 @@ You can add your project's wrappers in `~/.buildq/config.json`:
 - `"mode"`: `"rewrite"` (default) puts the command into the queue; `"deny"` blocks it and asks the
   agent to use `buildq run` itself.
 
+### Priorities
+
+Waiting builds are ordered by priority (`major` > `normal` > `minor`), FIFO within one priority.
+A running build is never interrupted. A build's priority is taken from the first of:
+
+1. `buildq run --priority minor|normal|major`;
+2. `$BUILDQ_PRIORITY`;
+3. the first matching rule in `~/.buildq/config.json`;
+4. `priority.default` there (`normal` if unset).
+
+```json
+{
+  "priority": {
+    "default": "normal",
+    "rules": [
+      {"env": "AUTOFIX_KEY", "priority": "minor"},
+      {"label": "^hotfix\\b", "priority": "major"}
+    ]
+  }
+}
+```
+
+A rule matches when all its conditions hold: `env` (the variable is set and non-empty) and Python
+regexes `label`, `worktree`, `branch`. Rules also apply to commands the hook moves into the queue,
+since the hook runs `buildq run` in the agent's environment.
+
+`buildq priority <ticket|pid> <level>` changes a waiting build's priority; it moves within the queue
+on its next poll (2 s). In the menu bar app a non-normal priority is shown as a badge; hover a waiting
+row and use the ⇅ button or its context menu to change it.
+
 See [`examples/config.json`](examples/config.json).
 
 ### Environment variables
@@ -436,6 +505,7 @@ See [`examples/config.json`](examples/config.json).
 |---|---|
 | `BUILDQ_HOME` | state directory (default `~/.buildq`) |
 | `BUILDQ_BYPASS=1` | let this command through the guard hook |
+| `BUILDQ_PRIORITY` | default queue priority for `buildq run` in this environment |
 | `BUILDQ_SIM_SOURCE` | source simulator UDID for `--refresh-base` (overrides the saved one) |
 | `BUILDQ_ORPHAN_GRACE` | seconds between SIGTERM and SIGKILL of an orphaned build (default 20) |
 | `BUILDQ_CLI` | path to `buildq` used by the menu bar app (set by the installers) |
@@ -444,11 +514,14 @@ See [`examples/config.json`](examples/config.json).
 
 | Command | What it does |
 |---|---|
-| `buildq run [--label L] [--log FILE \| --quiet \| --json] [--max-wait MIN] [--report-every SEC] -- CMD…` | wait for the slot, run `CMD`, release the slot |
+| `buildq run [--label L] [--priority P] [--log FILE \| --quiet \| --json] [--max-wait MIN] [--report-every SEC] -- CMD…` | wait for the slot, run `CMD`, release the slot |
 | `buildq status [--json] [--history N]` | running build, waiting tickets, last N results |
+| `buildq run --base NAME [--prepare COMMAND] [--include-ignored PATHSPEC] [--products-to DIR] [--no-dsym] -- CMD…` | reuse a fixed checkout and DerivedData; all normal run options still work |
+| `buildq bases [--json]` | list build bases, paths and the last mirrored worktree |
 | `buildq errors [ID] [--all] [--json] [--limit N]` | error lines of a build (default: this worktree's latest) |
 | `buildq log [ID] [--all] [--tail N] [--path]` | output of a build (default: this worktree's latest) |
 | `buildq cancel PID\|TICKET` | stop a waiting or running build (SIGTERM to its `buildq run`) |
+| `buildq priority PID\|TICKET minor\|normal\|major` | change the priority of a waiting build |
 | `buildq events [-n N] [--kind K1,K2] [--json]` | the event journal |
 | `buildq sim [--name N] [--no-boot]` | print (create and boot) this worktree's simulator UDID |
 | `buildq sim --list` / `--rm` | list buildq simulators / delete this worktree's one |
@@ -469,9 +542,11 @@ Event kinds in the journal:
 |---|---|
 | `enqueued` | a ticket joins the queue (with who is ahead) |
 | `acquired` | it gets the slot (with wait time and load) |
+| `base_synced` | a build base mirrors a worktree (changed/removed file counts and DerivedData path) |
 | `finished` | it finishes (with exit code and durations) |
 | `interrupted` | it is cancelled or receives a signal |
 | `timeout` | it gives up after `--max-wait` |
+| `priority` | its priority is changed (`old`, `new`) |
 | `orphan_term`, `orphan_kill` | its holder died mid-build and the orphaned build is stopped |
 | `reaped` | a dead ticket is removed |
 | `hook_rewrite`, `hook_deny` | the hook moves a command into the queue or blocks it (with session id and cwd) |
@@ -529,6 +604,15 @@ reaped by the next `buildq` call.
 make test       # unit, concurrency and localization tests (Python stdlib only)
 make app        # build/BuildQBar.app
 make install    # install your working copy
+```
+
+An opt-in integration test builds a tiny real Xcode project, checks cold/new-worktree/edited
+compile counts (`1 / 0 / 1`), and checks exported products and symbol mappings. Run it inside
+the machine queue:
+
+```bash
+bin/buildq run --label 'build bases integration' -- env BUILDQ_TEST_XCODE=1 PYTHONPATH=tests \
+  python3 -m unittest test_bases.Bases.test_real_xcodebuild_reuses_dd_and_exports_independent_symbols -v
 ```
 
 The concurrency tests start real processes:

@@ -46,13 +46,38 @@ buildq run --label "App build: fix login crash" --quiet -- \
 - Several heavy steps in one slot: `buildq run --label "gen+build" -- bash -c 'tuist generate --no-open && xcodebuild …'`.
 - Agents without background tasks just run `buildq run …` in the foreground; it blocks until done.
 
+## Reusable build bases (opt-in)
+
+Use `buildq run --base NAME -- ...` to reuse a fixed source checkout and DerivedData across
+worktrees. Direct `xcodebuild` receives the base's DerivedData automatically; omit your usual
+`-derivedDataPath`. For generated projects pass the actual command as `--prepare 'make tuist_fast'`
+or `--prepare 'tuist generate --no-open'`. Preparation runs before every build, inside the queue.
+Resolve dependencies in the base when needed; caller build folders are not mirrored.
+
+Export installable products with `--products-to <new-directory>` before leaving the queue;
+otherwise the next build may replace them. Export includes dSYMs (skip with `--no-dsym`). Keep
+using the calling worktree's simulator. `buildq bases --json` lists paths and last worktrees.
+
+Tracked and non-ignored untracked inputs are mirrored; ignored inputs need
+`--include-ignored PATHSPEC`. Build changes are not copied back to the caller. Submodules and
+external symlinks are unsupported. For shell commands explicitly pass
+`-derivedDataPath "$BUILDQ_DERIVED_DATA"`; shell strings are not rewritten. Do not nest
+`buildq run` within a base. Use `BUILDQ_BASE_ROOT` or `bases.root` to select SSD storage before
+warming a base. No shared CAS is enabled. See `docs/build-bases.md` for details.
+
 ## Status
 
 ```bash
 buildq status            # running build, waiting positions, recent finished builds
 buildq status --json
 buildq cancel <pid|id>   # only your own build, or when the user asks
+buildq priority <pid|id> minor|normal|major   # only when the user asks
 ```
+
+- Waiting builds go by priority (`major` > `normal` > `minor`), FIFO within one; the running
+  build is never preempted. Default `normal`; `--priority` or `$BUILDQ_PRIORITY` override it, and
+  `~/.buildq/config.json` rules can set it (e.g. autofix sessions are `minor`). Don't raise your
+  own priority unless the user asks.
 
 ## Simulator
 

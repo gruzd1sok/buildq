@@ -199,6 +199,36 @@
         }
       }
     },
+    "Base:": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "База:"
+          }
+        }
+      }
+    },
+    "Base: %@": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "База: %@"
+          }
+        }
+      }
+    },
+    "Reusable build base: %@. The first build can be cold.": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сборочная база: %@. Первый запуск может быть холодным."
+          }
+        }
+      }
+    },
     "Build queue": {
       "localizations": {
         "ru": {
@@ -215,6 +245,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Отмена"
+          }
+        }
+      }
+    },
+    "Change priority": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Изменить приоритет"
           }
         }
       }
@@ -299,6 +339,36 @@
         }
       }
     },
+    "major": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "высокий"
+          }
+        }
+      }
+    },
+    "minor": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "низкий"
+          }
+        }
+      }
+    },
+    "normal": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "обычный"
+          }
+        }
+      }
+    },
     "Nothing is building": {
       "localizations": {
         "ru": {
@@ -325,6 +395,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Очередь пуста"
+          }
+        }
+      }
+    },
+    "Queue priority: %@": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Приоритет в очереди: %@"
           }
         }
       }
