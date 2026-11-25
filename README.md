@@ -26,6 +26,7 @@ code. Any number of agents, terminals and scripts can call it at once.
 - [Features](#features)
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Reusable build bases](#reusable-build-bases)
 - [Examples](#examples)
 - [Menu bar app](#menu-bar-app)
 - [Setting up agents](#setting-up-agents)
@@ -118,6 +119,40 @@ buildq run --label "first build" --log /tmp/build.log -- \
 # 3. See what is going on
 buildq status
 ```
+
+## Reusable build bases
+
+`--base NAME` builds in a fixed checkout with its own DerivedData, shared by this repository's
+worktrees. Unchanged files keep their timestamps, so a fresh worktree can reuse an incremental
+build. Sync, preparation, compilation and product export all run inside the existing queue.
+
+```bash
+buildq run --base debug --prepare 'tuist generate --no-open' \
+  --products-to /tmp/app-build-123 --quiet -- \
+  xcodebuild -workspace App.xcworkspace -scheme App \
+  -destination "id=$(buildq sim --no-boot)" build
+
+buildq bases --json
+```
+
+BuildQBar shows a `Base: debug` badge on the running build, queued builds and history entries.
+It identifies the build mode; the first build in a base can still be cold.
+
+Omit `--prepare` for a checked-in Xcode project. Use your project's actual generation command
+(for example `make tuist_fast`) for Tuist projects. A base starts cold; a similar worktree's next
+build reuses its build data. Use separate names for incompatible configurations.
+
+`--products-to` must name a **new directory**. Its products and dSYMs outlive the next build in
+the base. Without it, products in the base may change immediately after the queue is released.
+Install exported products on your worktree's own simulator, outside the queue.
+
+For direct Xcode invocations, export checks the actual product directories before compilation
+and rejects outputs outside the base's Products tree. Symlinks that escape the exported tree
+are also rejected; internal relative framework links are preserved.
+
+The mode is opt-in. It does not enable a shared compilation cache or change project build
+settings. See [build bases](docs/build-bases.md) for preparation, SSD storage, ignored inputs,
+shell commands, symbols and limitations.
 
 ## Examples
 
@@ -481,6 +516,8 @@ See [`examples/config.json`](examples/config.json).
 |---|---|
 | `buildq run [--label L] [--priority P] [--log FILE \| --quiet \| --json] [--max-wait MIN] [--report-every SEC] -- CMD…` | wait for the slot, run `CMD`, release the slot |
 | `buildq status [--json] [--history N]` | running build, waiting tickets, last N results |
+| `buildq run --base NAME [--prepare COMMAND] [--include-ignored PATHSPEC] [--products-to DIR] [--no-dsym] -- CMD…` | reuse a fixed checkout and DerivedData; all normal run options still work |
+| `buildq bases [--json]` | list build bases, paths and the last mirrored worktree |
 | `buildq errors [ID] [--all] [--json] [--limit N]` | error lines of a build (default: this worktree's latest) |
 | `buildq log [ID] [--all] [--tail N] [--path]` | output of a build (default: this worktree's latest) |
 | `buildq cancel PID\|TICKET` | stop a waiting or running build (SIGTERM to its `buildq run`) |
@@ -505,6 +542,7 @@ Event kinds in the journal:
 |---|---|
 | `enqueued` | a ticket joins the queue (with who is ahead) |
 | `acquired` | it gets the slot (with wait time and load) |
+| `base_synced` | a build base mirrors a worktree (changed/removed file counts and DerivedData path) |
 | `finished` | it finishes (with exit code and durations) |
 | `interrupted` | it is cancelled or receives a signal |
 | `timeout` | it gives up after `--max-wait` |
@@ -566,6 +604,15 @@ reaped by the next `buildq` call.
 make test       # unit, concurrency and localization tests (Python stdlib only)
 make app        # build/BuildQBar.app
 make install    # install your working copy
+```
+
+An opt-in integration test builds a tiny real Xcode project, checks cold/new-worktree/edited
+compile counts (`1 / 0 / 1`), and checks exported products and symbol mappings. Run it inside
+the machine queue:
+
+```bash
+bin/buildq run --label 'build bases integration' -- env BUILDQ_TEST_XCODE=1 PYTHONPATH=tests \
+  python3 -m unittest test_bases.Bases.test_real_xcodebuild_reuses_dd_and_exports_independent_symbols -v
 ```
 
 The concurrency tests start real processes:

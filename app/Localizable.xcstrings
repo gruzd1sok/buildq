@@ -199,6 +199,36 @@
         }
       }
     },
+    "Base:": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "База:"
+          }
+        }
+      }
+    },
+    "Base: %@": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "База: %@"
+          }
+        }
+      }
+    },
+    "Reusable build base: %@. The first build can be cold.": {
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сборочная база: %@. Первый запуск может быть холодным."
+          }
+        }
+      }
+    },
     "Build queue": {
       "localizations": {
         "ru": {

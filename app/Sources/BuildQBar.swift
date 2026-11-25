@@ -24,6 +24,7 @@ struct Ticket: Decodable, Identifiable, Equatable {
     let started_at: Double?
     let full_log: String?
     let priority: String?
+    let base: String?
 
     var level: Priority { priority.flatMap(Priority.init(rawValue:)) ?? .normal }
 }
@@ -73,6 +74,7 @@ struct Hist: Decodable, Identifiable, Equatable {
     let exit: Int
     let finished_at: String
     let full_log: String?
+    let base: String?
     var id: String { finished_at + worktree + label }
 }
 
@@ -387,6 +389,25 @@ struct PriorityMenu: View {
     }
 }
 
+struct BaseBadge: View {
+    let name: String
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "externaldrive").font(.system(size: 9, weight: .medium))
+            Text(L("Base:")).fixedSize(horizontal: true, vertical: false)
+            Text(name).lineLimit(1).truncationMode(.middle)
+        }
+        .font(.system(size: 10, weight: .medium))
+        .foregroundStyle(.teal)
+        .padding(.horizontal, 5).padding(.vertical, 1)
+        .background(Capsule().fill(Color.teal.opacity(0.15)))
+        .help(L("Reusable build base: %@. The first build can be cold.", name))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(L("Base: %@", name))
+    }
+}
+
 struct SectionTitle: View {
     let text: String
     var body: some View {
@@ -419,6 +440,7 @@ struct RunningCard: View {
                 HStack(alignment: .firstTextBaseline) {
                     Circle().fill(m.light.light.color).frame(width: 8, height: 8)
                     Text(name(t.worktree)).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    if let base = t.base { BaseBadge(name: base) }
                     if t.level != .normal { PriorityBadge(p: t.level) }
                     Spacer()
                     Text(dur(elapsed)).font(.system(size: 13, weight: .medium, design: .rounded)).monospacedDigit()
@@ -483,6 +505,7 @@ struct WaitingRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(name(t.worktree)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    if let base = t.base { BaseBadge(name: base) }
                     PriorityBadge(p: t.level)
                 }
                 Text(t.label).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
@@ -526,7 +549,10 @@ struct HistoryRow: View {
         HStack(spacing: 10) {
             Image(systemName: status.0).foregroundStyle(status.1).font(.system(size: 14))
             VStack(alignment: .leading, spacing: 2) {
-                Text(name(h.worktree)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(name(h.worktree)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                    if let base = h.base { BaseBadge(name: base) }
+                }
                 Text(h.label).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()

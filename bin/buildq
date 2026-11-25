@@ -10,15 +10,19 @@ __version__ = "0.2.0"
 
 import argparse
 import fcntl
+import hashlib
 import itertools
 import json
 import os
+import plistlib
 import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -237,6 +241,12 @@ def cmd_run(args):
     cmd = args.cmd[1:] if args.cmd and args.cmd[0] == "--" else args.cmd
     if not cmd:
         sys.exit("buildq run: missing command, usage: buildq run [--label L] [--log FILE] -- <cmd...>")
+    if args.base and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", args.base):
+        sys.exit("buildq run: --base needs a name of 1–64 letters, digits, _, . or - (start with a letter/digit)")
+    if not args.base and (args.prepare or args.include_ignored or args.products_to or args.no_dsym):
+        sys.exit("buildq run: --prepare, --include-ignored, --products-to and --no-dsym require --base")
+    if os.environ.get("BUILDQ_BASE_DIR"):
+        sys.exit("buildq run: already inside a buildq base; run the command directly to avoid a nested queue")
     ensure_dirs()
     label = args.label or " ".join(cmd)[:80]
     worktree, branch = worktree_root(), git_branch()
@@ -252,6 +262,8 @@ def cmd_run(args):
         "log": str(Path(args.log).absolute()) if args.log else None,
         "state": "waiting",
     }
+    if args.base:
+        ticket["base"] = args.base
     enqueue(ticket)
     ticket["full_log"] = str(LOGS / f"{ticket['id']}.log")
     write_ticket(ticket)
@@ -339,10 +351,19 @@ def cmd_run(args):
         Path(ticket["log"]).unlink(missing_ok=True)
         os.symlink(ticket["full_log"], ticket["log"])
     passthrough = not (ticket["log"] or args.quiet or args.json)
+    child_env = None
+    if args.base:
+        settings = {"name": args.base, "origin": str(Path(worktree).resolve()),
+                    "cwd": str(Path.cwd().resolve()), "prepare": args.prepare,
+                    "include_ignored": args.include_ignored,
+                    "products_to": str(Path(args.products_to).absolute()) if args.products_to else None,
+                    "dsym": not args.no_dsym}
+        cmd = [sys.executable, str(Path(__file__).resolve()), "_base-run", json.dumps(settings), *cmd]
+        child_env = {**os.environ, "BUILDQ_BASE_LOCK_FD": str(lock_fd)}
     # The build inherits the locked fd: if this wrapper is SIGKILLed, the slot stays taken until the
     # orphaned build is really gone, so two builds never overlap.
     state["child"] = subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.PIPE,
-                                      stderr=subprocess.STDOUT, pass_fds=(lock_fd,))
+                                      stderr=subprocess.STDOUT, pass_fds=(lock_fd,), env=child_env)
     ticket["child_pgid"] = state["child"].pid
     write_ticket(ticket)
     with open(ticket["full_log"], "wb") as f:
@@ -357,7 +378,8 @@ def cmd_run(args):
     cleanup()
     append_jsonl(HISTORY, {"id": ticket["id"], "worktree": ticket["worktree"], "branch": ticket["branch"],
                            "label": label, "waited": round(waited), "ran": round(ran), "exit": rc,
-                           "full_log": ticket["full_log"], "finished_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+                           "full_log": ticket["full_log"], "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                           "base": args.base})
     event("finished", ticket=ticket["id"], worktree=ticket["worktree"], label=label, exit=rc,
           waited=round(waited), ran=round(ran), full_log=ticket["full_log"])
     prune_logs()
@@ -367,10 +389,447 @@ def cmd_run(args):
     if args.json:
         print(json.dumps({"id": ticket["id"], "exit": rc, "waited": round(waited), "ran": round(ran),
                           "log": ticket["full_log"], "errors": parse_errors(ticket["full_log"])[:ERRORS_LIMIT]
-                          if rc != 0 else []}, ensure_ascii=False))
+                          if rc != 0 else [],
+                          **({"base": args.base, "products": settings["products_to"] if rc == 0 else None}
+                             if args.base else {})}, ensure_ascii=False))
     elif rc != 0 and not passthrough:
         print_errors(ticket["full_log"])
     sys.exit(rc)
+
+
+# ---------- reusable build bases (always run as a child of the queue holder) ----------
+
+BASE_SIGNAL = 0
+
+
+class BaseCancelled(Exception):
+    pass
+
+
+def base_check_cancel():
+    if BASE_SIGNAL:
+        raise BaseCancelled()
+
+
+def base_on_signal(signum, _frame):
+    # The outer wrapper signals our whole process group. Wait for the active child to exit:
+    # otherwise the wrapper could finish waiting and unlock while a grandchild still compiles.
+    global BASE_SIGNAL
+    BASE_SIGNAL = signum
+
+
+def base_root():
+    configured = load_config().get("bases", {}).get("root", HOME / "bases")
+    return Path(os.environ.get("BUILDQ_BASE_ROOT", configured)).expanduser().resolve()
+
+
+def base_env():
+    # Git hooks may export these: do not let them redirect git in the mirrored checkout.
+    env = dict(os.environ)
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_PREFIX",
+                "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"):
+        env.pop(key, None)
+    return env
+
+
+def base_exec(cmd, cwd, env, capture=False):
+    # All descendants keep the queue lock, including git, preparation, compiler and dsymutil.
+    fd = int(os.environ["BUILDQ_BASE_LOCK_FD"])
+    base_check_cancel()
+    result = subprocess.run(cmd, cwd=cwd, env=env, pass_fds=(fd,),
+                            stdout=subprocess.PIPE if capture else None,
+                            stderr=subprocess.PIPE if capture else None)
+    base_check_cancel()
+    return result
+
+
+def base_git(cwd, env, *cmd):
+    result = base_exec(["git", *cmd], cwd, {**env, "GIT_LFS_SKIP_SMUDGE": "1"}, capture=True)
+    if result.returncode:
+        raise ValueError(f"git {cmd[0]} failed: {result.stderr.decode(errors='replace').strip()}")
+    return result.stdout
+
+
+def base_write_state(path, data):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=True))
+    os.replace(tmp, path)
+
+
+def base_fingerprint(path):
+    if path.is_symlink():
+        return ("link", os.readlink(path))
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return ("file", digest.hexdigest(), stat.S_IMODE(path.stat().st_mode))
+
+
+def base_path(src, rel):
+    """Never traverse a symlink a previous build left in a source directory."""
+    path = src / rel
+    if Path(rel).is_absolute() or ".." in Path(rel).parts or ".git" in Path(rel).parts:
+        raise ValueError(f"unsafe source path: {rel}")
+    for parent in path.relative_to(src).parents:
+        if (src / parent).is_symlink():
+            raise ValueError(f"source directory is a symlink in the base: {parent}")
+    return path
+
+
+def base_sync(origin, src, state_path, state, head, env, include_ignored):
+    entries = base_git(origin, env, "ls-files", "--stage", "-z").split(b"\0")
+    if any(entry.startswith(b"160000 ") for entry in entries):
+        raise ValueError("submodules are not supported by --base yet")
+    names = base_git(origin, env, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")
+    if include_ignored:
+        names += base_git(origin, env, "ls-files", "-z", "--others", "--ignored", "--exclude-standard",
+                          "--", *include_ignored).split(b"\0")
+    files = set()
+    for name in filter(None, names):
+        rel = os.fsdecode(name)
+        path = origin / rel
+        if path.is_symlink() or path.is_file():
+            files.add(rel)
+        elif path.is_dir():
+            raise ValueError(f"submodules are not supported by --base yet: {rel}")
+    previous = set(state.get("files", []))
+    # Journal the union before any writes: an interrupted sync can be repaired on the next run.
+    state["files"] = sorted(previous | files)
+    base_write_state(state_path, state)
+    changed = removed = 0
+    for rel in sorted(previous - files, key=lambda p: len(Path(p).parts), reverse=True):
+        path = base_path(src, rel)
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+            removed += 1
+            parent = path.parent
+            while parent != src:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+    for rel in sorted(files):
+        source, target = origin / rel, base_path(src, rel)
+        signature = base_fingerprint(source)
+        if signature is None:
+            raise ValueError(f"source changed during sync: {source}; retry the build")
+        if source.is_symlink():
+            resolved = source.resolve()
+            try:
+                internal = resolved.relative_to(origin)
+            except ValueError:
+                raise ValueError(f"source symlink points outside the repository: {source}") from None
+            link = os.readlink(source)
+            if os.path.isabs(link):
+                signature = ("link", str(src / internal))
+        if target.is_dir() and not target.is_symlink():
+            # Never recursively delete generated data merely to make a source path fit.
+            target.rmdir()
+        if signature == base_fingerprint(target):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        copy_fd, copy_name = tempfile.mkstemp(prefix=".buildq-sync-", dir=target.parent)
+        os.close(copy_fd)
+        temporary = Path(copy_name)
+        try:
+            if signature[0] == "link":
+                temporary.unlink()
+                temporary.symlink_to(signature[1])
+            else:
+                shutil.copy2(source, temporary)
+                if base_fingerprint(temporary) != signature:
+                    raise ValueError(f"source changed during sync: {source}; retry the build")
+                # A changed file must look changed even if its source timestamp was restored.
+                os.utime(temporary, ns=(time.time_ns(), time.time_ns()))
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        changed += 1
+    # Keep git-based version scripts accurate, without checkout rewriting source timestamps.
+    base_git(src, env, "update-ref", "--no-deref", "HEAD", head)
+    base_git(src, env, "read-tree", head)
+    state.update(files=sorted(files), head=head, worktree=str(origin), updated=time.time())
+    base_write_state(state_path, state)
+    return changed, removed
+
+
+def base_generated_times(src):
+    """Tuist/XcodeGen may rewrite identical project files; preserve their incremental timestamps."""
+    times = {}
+    for directory, dirs, files in os.walk(src, followlinks=False):
+        dirs[:] = [d for d in dirs if d not in (".git", ".build", "node_modules", "DerivedData", ".tuist")
+                   and not (Path(directory) / d).is_symlink()]
+        parts = Path(directory).relative_to(src).parts
+        if not any(p.endswith((".xcodeproj", ".xcworkspace")) or p == "Derived" for p in parts):
+            continue
+        for name in files:
+            path = Path(directory) / name
+            if path.is_file() and not path.is_symlink():
+                st = path.stat()
+                times[path] = (base_fingerprint(path), st.st_atime_ns, st.st_mtime_ns)
+    return times
+
+
+def base_is_xcodebuild(cmd):
+    return Path(cmd[0]).name == "xcodebuild" or (len(cmd) > 1 and
+           Path(cmd[0]).name == "xcrun" and cmd[1] == "xcodebuild")
+
+
+def base_command(cmd, origin, src, derived):
+    if not base_is_xcodebuild(cmd):
+        return cmd
+    if any(a == "-derivedDataPath" or a.startswith("-derivedDataPath=") for a in cmd):
+        raise ValueError("--base owns DerivedData; remove -derivedDataPath and use --products-to for outputs")
+    rewritten = []
+    for arg in cmd:
+        # Only argument values are mapped, never code inside a shell -c string.
+        key, sep, value = arg.partition("=") if not os.path.isabs(arg) else ("", "", arg)
+        path = value if sep else arg
+        if os.path.isabs(path):
+            try:
+                path = str(src / Path(path).resolve().relative_to(origin))
+            except ValueError:
+                pass
+        rewritten.append(key + sep + path if sep else path)
+    return [*rewritten, "-derivedDataPath", str(derived)]
+
+
+def base_check_products_settings(command, cwd, env, derived):
+    """Do not export a stale default Products tree when Xcode actually builds elsewhere."""
+    if not base_is_xcodebuild(command):
+        return  # Custom commands explicitly own the contract of writing to BUILDQ_DERIVED_DATA.
+    query = []
+    args = iter(command)
+    for arg in args:
+        # A settings query must not create a result bundle the real command needs to create.
+        if arg in ("-resultBundlePath", "-resultStreamPath", "-archivePath"):
+            if next(args, None) is None:
+                raise ValueError(f"missing value for {arg}")
+        elif arg not in ("-showBuildSettings", "-json"):
+            query.append(arg)
+    result = base_exec([*query, "-showBuildSettings", "-json"], cwd, env, capture=True)
+    if result.returncode:
+        detail = result.stderr.decode(errors="replace").strip()
+        raise ValueError(f"cannot verify product directories before export: {detail}")
+    try:
+        targets = json.loads(result.stdout)
+    except ValueError:
+        raise ValueError("cannot verify product directories: xcodebuild returned invalid build settings JSON") from None
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("cannot verify product directories: xcodebuild returned no target settings")
+    allowed = derived.resolve() / "Build" / "Products"
+    for target in targets:
+        settings = target.get("buildSettings") if isinstance(target, dict) else None
+        if not isinstance(settings, dict):
+            raise ValueError("cannot verify product directories: missing build settings")
+        for key in ("BUILT_PRODUCTS_DIR", "TARGET_BUILD_DIR"):
+            value = settings.get(key)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"cannot verify product directories: missing {key}")
+            actual = (cwd / value).resolve()
+            if not actual.is_relative_to(allowed):
+                raise ValueError(f"--products-to cannot export products outside {allowed}: "
+                                 f"{target.get('target', '?')} {key}={actual}; remove the product-directory "
+                                 "override or omit --products-to and manage those products explicitly")
+
+
+def base_path_spellings(path):
+    # Xcode/DWARF may spell /private/var as /var (likewise /private/tmp as /tmp),
+    # even when our checkout and cwd use the canonical path. LLDB must recognize both.
+    value = str(path)
+    spellings = {value}
+    for prefix in ("/private/var/", "/private/tmp/"):
+        if value.startswith(prefix):
+            spellings.add(value[len("/private"):])
+    return sorted(spellings)
+
+
+def base_stream(cmd, cwd, env, src, origin):
+    fd = int(os.environ["BUILDQ_BASE_LOCK_FD"])
+    base_check_cancel()
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, pass_fds=(fd,))
+    # Map compiler diagnostics back to editable sources; generated files retain their real paths.
+    prefixes = b"|".join(re.escape(os.fsencode(p)) for p in base_path_spellings(src))
+    pattern = re.compile(rb"(?:" + prefixes + rb")(/[^\s:\"']+)")
+    try:
+        for line in proc.stdout:
+            def mapped(match):
+                path = os.fsencode(origin) + match[1]
+                return path if os.path.exists(path) else match[0]
+            sys.stdout.buffer.write(pattern.sub(mapped, line))
+            sys.stdout.buffer.flush()
+        code = proc.wait()
+        base_check_cancel()
+        return code if code >= 0 else 128 - code
+    finally:
+        proc.stdout.close()
+
+
+def base_check_product_links(root):
+    """Only relative links contained in the copied tree remain independent after publication."""
+    canonical_root = root.resolve()
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        base_check_cancel()
+        for name in dirs + files:
+            path = Path(directory) / name
+            if not path.is_symlink():
+                continue
+            try:
+                target = path.resolve(strict=True)
+            except (OSError, RuntimeError):
+                raise ValueError(f"invalid product symlink: {path.relative_to(root)}") from None
+            if not target.is_relative_to(canonical_root):
+                raise ValueError(f"product symlink points outside the export: {path.relative_to(root)}; "
+                                 "build self-contained products before using --products-to")
+
+
+def base_export(derived, destination, src, origin, env, dsym):
+    products = derived / "Build" / "Products"
+    if not products.is_dir():
+        raise ValueError(f"no products to export at {products}")
+    if products.resolve() != derived.resolve() / "Build" / "Products":
+        raise ValueError("product directory redirects outside the base's Products tree")
+    # Copy to a sibling staging folder and publish atomically; an interrupted export stays private.
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".buildq-products-", dir=destination.parent) as temp:
+        stage = Path(temp) / "products"
+        shutil.copytree(products, stage, symlinks=True)
+        base_check_product_links(stage)
+        base_check_cancel()
+        if dsym:
+            magic = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf",
+                     b"\xfe\xed\xfa\xce", b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"}
+            binaries = []
+            for directory, dirs, files in os.walk(stage):
+                dirs[:] = [d for d in dirs if not d.endswith(".dSYM")]
+                for name in files:
+                    path = Path(directory) / name
+                    if path.is_symlink():
+                        continue
+                    with path.open("rb") as f:
+                        if f.read(4) in magic:
+                            binaries.append(path)
+            for binary in binaries:
+                symbols = stage / "BuildQSymbols" / (str(binary.relative_to(stage)) + ".dSYM")
+                symbols.parent.mkdir(parents=True, exist_ok=True)
+                result = base_exec(["xcrun", "dsymutil", str(binary), "-o", str(symbols)], src, env)
+                if result.returncode:
+                    return result.returncode
+                result = base_exec(["xcrun", "dwarfdump", "--uuid", str(symbols)], src, env, capture=True)
+                if result.returncode:
+                    raise ValueError("could not read exported dSYM UUIDs")
+                resources = symbols / "Contents" / "Resources"
+                resources.mkdir(parents=True, exist_ok=True)
+                for uuid in re.findall(rb"UUID: ([0-9A-Fa-f-]+)", result.stdout):
+                    with (resources / (uuid.decode() + ".plist")).open("wb") as f:
+                        plistlib.dump({"DBGVersion": "3", "DBGSourcePathRemapping": {
+                            spelling: str(origin) for spelling in base_path_spellings(src)}}, f)
+        base_check_cancel()
+        base_check_product_links(stage)
+        if destination.exists() or destination.is_symlink():
+            raise ValueError(f"--products-to must name a new directory: {destination}")
+        os.rename(stage, destination)
+    log(f"products exported to {destination}")
+    return 0
+
+
+def cmd_base_run(args):
+    """Internal worker: preparation and all its descendants remain under the outer queue lock."""
+    try:
+        options = json.loads(args.settings)
+        fd = int(os.environ["BUILDQ_BASE_LOCK_FD"])
+        os.fstat(fd)
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(signum, base_on_signal)
+        origin, cwd = Path(options["origin"]), Path(options["cwd"])
+        env = base_env()
+        common = os.fsdecode(base_git(origin, env, "rev-parse", "--git-common-dir")).strip()
+        common = (origin / common).resolve()
+        identity = hashlib.sha256(os.fsencode(common)).hexdigest()[:16]
+        directory = base_root() / identity / options["name"]
+        src, derived = directory / "src", directory / "DerivedData"
+        if directory == origin or directory.is_relative_to(origin):
+            raise ValueError("build bases must live outside the source worktree; set BUILDQ_BASE_ROOT")
+        destination = Path(options["products_to"]).resolve() if options["products_to"] else None
+        if destination and (destination.exists() or destination.is_relative_to(directory)
+                            or destination == origin or origin.is_relative_to(destination)):
+            raise ValueError("--products-to must be a new directory outside the base and source parents")
+        head = base_git(origin, env, "rev-parse", "HEAD").decode().strip()
+        directory.mkdir(parents=True, exist_ok=True)
+        state_path = directory / "state.json"
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if not isinstance(state, dict) or not isinstance(state.get("files", []), list) or not all(
+                isinstance(p, str) for p in state.get("files", [])):
+            raise ValueError(f"invalid build base state: {state_path}")
+        if state and state.get("repository") != str(common):
+            raise ValueError("build base belongs to another repository")
+        state.update(name=options["name"], repository=str(common), directory=str(directory))
+        if not (src / ".git").exists():
+            if src.exists():
+                raise ValueError(f"base checkout is incomplete: {src}; remove it with git worktree remove")
+            base_git(origin, env, "worktree", "add", "--detach", "--no-checkout", str(src), head)
+        actual_common = os.fsdecode(base_git(src, env, "rev-parse", "--git-common-dir")).strip()
+        if (src / actual_common).resolve() != common:
+            raise ValueError("base checkout has an unexpected git common directory")
+        changed, removed = base_sync(origin, src, state_path, state, head, env, options["include_ignored"])
+        log(f"base {options['name']}: {changed} changed, {removed} removed; DerivedData: {derived}")
+        event("base_synced", base=options["name"], worktree=str(origin), changed=changed,
+              removed=removed, derived_data=str(derived))
+        derived.mkdir(exist_ok=True)
+        cache = directory / "cache"
+        cache.mkdir(exist_ok=True)
+        env.update(BUILDQ_BASE_DIR=str(directory), BUILDQ_WORKTREE=str(origin),
+                   BUILDQ_DERIVED_DATA=str(derived), BUILDQ_BASE_CACHE=str(cache))
+        command = base_command(args.cmd, origin, src, derived)
+        for prepare in options["prepare"]:
+            times = base_generated_times(src)
+            code = base_stream(["/bin/sh", "-c", prepare], src, env, src, origin)
+            for path, (fingerprint, atime, mtime) in times.items():
+                if base_fingerprint(path) == fingerprint:
+                    os.utime(path, ns=(atime, mtime))
+            if code:
+                return code
+        build_cwd = base_path(src, str(cwd.relative_to(origin)))
+        build_cwd.mkdir(parents=True, exist_ok=True)
+        if destination:
+            base_check_products_settings(command, build_cwd, env, derived)
+        code = base_stream(command, build_cwd, env, src, origin)
+        if code == 0 and destination:
+            code = base_export(derived, destination, src, origin, env, options["dsym"])
+        base_check_cancel()
+        return code
+    except BaseCancelled:
+        return 128 + BASE_SIGNAL
+    except OSError as e:
+        print(f"error: build base: {e}", file=sys.stderr, flush=True)
+        return 127 if isinstance(e, FileNotFoundError) and e.filename and not Path(e.filename).exists() else 1
+    except (ValueError, KeyError) as e:
+        print(f"error: build base: {e}", file=sys.stderr, flush=True)
+        return 1
+
+
+def cmd_bases(args):
+    records = []
+    for path in sorted(base_root().glob("*/*/state.json")):
+        try:
+            state = json.loads(path.read_text())
+            if not isinstance(state, dict):
+                continue
+            records.append({k: state.get(k) for k in ("name", "repository", "directory", "worktree", "head", "updated")})
+        except (OSError, ValueError):
+            continue
+    if args.json:
+        print(json.dumps(records, ensure_ascii=False))
+    else:
+        for record in records:
+            print(f"{record['name']}: {record['directory']} (last worktree: {record['worktree']})")
+        if not records:
+            print("no build bases")
 
 
 ERROR_LINE = re.compile(r"(error:|\*\* .*FAILED \*\*|Testing failed|fatal error)", re.I)
@@ -736,6 +1195,9 @@ def cmd_sim(args):
 
 
 def main():
+    # Private worker entry point, invoked only after the queue lock has been acquired.
+    if len(sys.argv) > 2 and sys.argv[1] == "_base-run":
+        sys.exit(cmd_base_run(argparse.Namespace(settings=sys.argv[2], cmd=sys.argv[3:])))
     p = argparse.ArgumentParser(prog="buildq", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"buildq {__version__}")
@@ -754,6 +1216,14 @@ def main():
                    help="keep the command output in the log only; on failure print the error lines")
     r.add_argument("--json", action="store_true",
                    help="like --quiet, then print one JSON object: id, exit, waited, ran, log, errors")
+    r.add_argument("--base", metavar="NAME", help="build in a reusable base shared by this repository's worktrees")
+    r.add_argument("--prepare", action="append", default=[], metavar="COMMAND",
+                   help="with --base: shell command to prepare the project before each build (repeatable)")
+    r.add_argument("--include-ignored", action="append", default=[], metavar="PATHSPEC",
+                   help="with --base: also mirror ignored files matching this git pathspec (repeatable)")
+    r.add_argument("--products-to", metavar="DIR",
+                   help="with --base: export successful products and dSYMs to a new directory")
+    r.add_argument("--no-dsym", action="store_true", help="with --products-to: skip exporting debug symbols")
     r.add_argument("cmd", nargs=argparse.REMAINDER)
     r.set_defaults(func=cmd_run)
 
@@ -761,6 +1231,10 @@ def main():
     s.add_argument("--json", action="store_true")
     s.add_argument("--history", type=int, default=5, help="show N recent finished builds")
     s.set_defaults(func=cmd_status)
+
+    b = sub.add_parser("bases", help="list reusable build bases and their paths")
+    b.add_argument("--json", action="store_true")
+    b.set_defaults(func=cmd_bases)
 
     for name, func, help_ in (("errors", cmd_errors, "error lines of a build (default: this worktree's latest)"),
                               ("log", cmd_log, "output of a build (default: this worktree's latest)")):
