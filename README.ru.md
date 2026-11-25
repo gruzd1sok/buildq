@@ -72,6 +72,47 @@ make install-cli                # только CLI
 make uninstall
 ```
 
+### Codex (локально на macOS)
+
+Для новой установки из исходников установите CLI и подключите скилл:
+
+```bash
+git clone https://github.com/gruzd1sok/buildq "$HOME/buildq"
+cd "$HOME/buildq"
+make install-cli
+export PATH="$HOME/.local/bin:$PATH"
+mkdir -p "$HOME/.agents/skills"
+ln -s "$PWD/skills/buildq" "$HOME/.agents/skills/buildq"
+
+command -v buildq
+buildq --version
+test -f "$HOME/.agents/skills/buildq/SKILL.md"
+```
+
+Если checkout уже есть, начните с `cd`. Перед созданием ссылки убедитесь, что
+`~/.agents/skills/buildq` ещё не существует: установленную личную версию сначала проверьте.
+Checkout нужно сохранить — скилл читается по ссылке и обновляется вместе с ним. Для отдельной
+копии попросите `$skill-installer` в Codex установить скилл из
+`https://github.com/gruzd1sok/buildq/tree/main/skills/buildq`; CLI устанавливается отдельно.
+
+Codex поддерживает [пользовательские скиллы и симлинки на их каталоги](https://developers.openai.com/codex/skills/).
+Если скилл не появился, перезапустите Codex. В новом чате проверьте вызов:
+
+```text
+$buildq Собери этот проект через общую очередь и покажи результат.
+```
+
+Проверьте `command -v buildq` также в shell Codex. Сохраните PATH в конфигурации оболочки,
+из которой запускается Codex, либо используйте `$HOME/.local/bin/buildq` явно. GUI можно
+доустановить командой `buildq run --label 'BuildQBar install' -- make install-app` из checkout.
+Этот вариант требует локальной macOS с Xcode; в облачной Linux-среде iOS-инструменты не работают.
+
+В Codex тяжёлые команды нужно явно оборачивать в `buildq run ... -- <команда>` и ожидать
+завершения штатной сессии команды. Bash-хук и `run_in_background` относятся к Claude Code.
+Добавьте в `AGENTS.md` вашего iOS-проекта правило: «Сборки, тесты с компиляцией и генерацию
+проекта выполнять через `buildq run`; для запуска брать симулятор своего worktree из `buildq sim`».
+Корневой [`AGENTS.md`](AGENTS.md) этого репозитория описывает разработку самого buildq.
+
 ## Использование
 
 ```bash

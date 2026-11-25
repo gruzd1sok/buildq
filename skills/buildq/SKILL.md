@@ -7,14 +7,14 @@ description: Shared FIFO build queue and per-worktree iOS simulators for paralle
 
 Several agents may work on this Mac at once, each in its own git worktree. One Xcode build already
 uses every core, and parallel builds or `tuist generate` runs slow each other down and fight over
-shared caches. `buildq` serializes them: one heavy command at a time, strict FIFO across all
-worktrees and agents.
+shared caches. `buildq` serializes them: one heavy command at a time across all worktrees and
+agents, by priority and FIFO within each priority.
 
 Each worktree gets **its own simulator clone**, so the queue holds the slot only while the command
 runs. Installing, launching and checking the app on your simulator happens outside the queue, and
 the next agent's build starts right after yours finishes.
 
-A PreToolUse hook catches raw `xcodebuild` and `tuist generate|build|test|install|cache` in Bash
+In Claude Code, a PreToolUse hook catches raw `xcodebuild` and `tuist generate|build|test|install|cache` in Bash
 (plus any patterns from `~/.buildq/config.json`) and rewrites them into
 `buildq run … -- "$SHELL" -c '<your command>'` in the background, so a forgotten wrapper still goes
 through the queue. Wrap builds yourself anyway: you choose the label and the output mode. Light
@@ -23,8 +23,11 @@ calls pass without the queue: `xcodebuild -list|-showBuildSettings|-showdestinat
 
 ## Build
 
-Run with `run_in_background: true` and wait for the completion notification — do not poll and do
-not sleep. Waiting can take a while if others are building.
+Codex and other adapters: explicitly use `buildq run` and the adapter's normal command-session
+completion mechanism. Do not assume that the Claude Code hook rewrites their commands.
+
+Claude Code: run with `run_in_background: true` and wait for the completion notification.
+Waiting can take a while if others are building.
 
 ```bash
 buildq run --label "App build: fix login crash" --quiet -- \

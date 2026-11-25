@@ -105,6 +105,46 @@ make uninstall        # remove both (state in ~/.buildq is kept)
 Use `PREFIX=/usr/local make install` to put the CLI somewhere else and `APP_DIR=/Applications` to
 move the app.
 
+### Codex (local macOS)
+
+For a fresh source install, install the CLI and link the skill into Codex's user skill directory:
+
+```bash
+git clone https://github.com/gruzd1sok/buildq "$HOME/buildq"
+cd "$HOME/buildq"
+make install-cli
+export PATH="$HOME/.local/bin:$PATH"
+mkdir -p "$HOME/.agents/skills"
+ln -s "$PWD/skills/buildq" "$HOME/.agents/skills/buildq"
+
+command -v buildq
+buildq --version
+test -f "$HOME/.agents/skills/buildq/SKILL.md"
+```
+
+If you already have the checkout, start with `cd` instead of cloning. Before creating the link,
+ensure `~/.agents/skills/buildq` does not already exist; inspect an existing skill instead of
+overwriting it. Keep the checkout: the symlink reads the skill from it, including future updates.
+For a separate copy, ask Codex's `$skill-installer` to install
+`https://github.com/gruzd1sok/buildq/tree/main/skills/buildq` after installing the CLI.
+
+Codex supports [user skills and symlinked skill folders](https://developers.openai.com/codex/skills/).
+If the skill does not appear, restart Codex. In a new conversation, try:
+
+```text
+$buildq Build this project through the shared queue and show the result.
+```
+
+Make sure `command -v buildq` also works in Codex's shell. Persist the PATH entry in the shell
+configuration used to start Codex, or use `$HOME/.local/bin/buildq` explicitly. The optional menu
+bar app can then be installed with `buildq run --label 'BuildQBar install' -- make install-app`.
+This setup requires local macOS/Xcode; a hosted Linux environment cannot run the iOS build tools.
+
+Codex must explicitly run `buildq run ... -- <command>` and use its normal command-session
+completion mechanism. The Claude Code Bash hook and `run_in_background` option are specific to
+Claude Code. Add the short [project rule](#other-agents) to the iOS project's `AGENTS.md` to keep
+builds queued even when the skill is not explicitly invoked.
+
 ## Quick start
 
 ```bash
@@ -417,7 +457,13 @@ Claude Code can run `buildq run …` with `run_in_background: true`, so the agen
 build finishes instead of hitting the Bash timeout while it waits in the queue. The skill tells it
 to do so, and the hook does it for commands the agent did not wrap itself.
 
-### Codex, OpenCode, Cursor and others
+### Codex
+
+Follow [Codex installation](#codex-local-macos) to install the CLI and skill. The root
+[`AGENTS.md`](AGENTS.md) in this repository is for maintaining buildq; the following project rule
+belongs in the application repository you build.
+
+### Other agents
 
 Put `buildq` on `PATH` and add a rule to the project's `AGENTS.md` (or the agent's equivalent):
 

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Repository agent guidance in `AGENTS.md`, shared through a relative `CLAUDE.md` symlink,
+  and Codex installation instructions in both READMEs.
 - Product export verifies actual Xcode build settings before compiling and rejects redirected
   product directories instead of copying stale default outputs. Export also rejects external,
   absolute-to-base, dangling and cyclic product symlinks while preserving internal framework links.
